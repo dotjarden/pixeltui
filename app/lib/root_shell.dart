@@ -176,66 +176,58 @@ class MiniPlayer extends StatelessWidget {
       builder: (context, snap) {
         final item = currentItem(snap.data);
         if (item == null) return const SizedBox.shrink();
-        return SizedBox(
-          height: kMiniHeight,
-          child: Row(
-            children: [
-              Expanded(
-                child: AdaptiveButton.child(
-                  onPressed: onTap,
-                  style: AdaptiveButtonStyle.glass,
-                  borderRadius: BorderRadius.circular(22),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                  child: Row(
+        // One full-width Liquid-Glass capsule; tap opens the full player
+        // (transport controls live there). Sized via the child since the native
+        // glass button hugs its content.
+        return AdaptiveButton.child(
+          onPressed: onTap,
+          style: AdaptiveButtonStyle.glass,
+          borderRadius: BorderRadius.circular(24),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: SizedBox(
+            width: double.infinity,
+            height: kMiniHeight - 16,
+            child: Row(
+              children: [
+                trackArt(item.artUri, size: 44, radius: 10),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      trackArt(item.artUri, size: 42, radius: 9),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(item.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    color: kText,
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 15)),
-                            if ((item.artist ?? '').isNotEmpty)
-                              Text(item.artist!,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      color: kMuted, fontSize: 12)),
-                          ],
-                        ),
-                      ),
+                      Text(item.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: kText,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 15)),
+                      if ((item.artist ?? '').isNotEmpty)
+                        Text(item.artist!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style:
+                                const TextStyle(color: kMuted, fontSize: 12)),
                     ],
                   ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              StreamBuilder<bool>(
-                stream: player.playingStream,
-                builder: (c, s) {
-                  final playing = s.data ?? false;
-                  return AdaptiveButton.child(
-                    onPressed: playing ? player.pause : player.play,
-                    style: AdaptiveButtonStyle.glass,
-                    borderRadius: BorderRadius.circular(22),
-                    padding: const EdgeInsets.all(14),
-                    child: Icon(
+                const SizedBox(width: 12),
+                StreamBuilder<bool>(
+                  stream: player.playingStream,
+                  builder: (c, s) {
+                    final playing = s.data ?? false;
+                    return Icon(
                         playing
                             ? CupertinoIcons.pause_fill
                             : CupertinoIcons.play_fill,
                         color: kText,
-                        size: 24),
-                  );
-                },
-              ),
-            ],
+                        size: 28);
+                  },
+                ),
+              ],
+            ),
           ),
         );
       },
