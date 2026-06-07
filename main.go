@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,10 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 
 	"pixeltui/config"
 	"pixeltui/engine"
@@ -199,6 +204,7 @@ func cmdRecommend(args []string) {
 			Subsonic:    sub,
 			LocalDirs:   cfg.LocalDirs,
 			DownloadDir: cfg.DownloadDir,
+			Theme:       cfg.Theme,
 		})
 		return
 	}
@@ -293,6 +299,7 @@ func cmdRecommend(args []string) {
 		Subsonic:    sub,
 		LocalDirs:   cfg.LocalDirs,
 		DownloadDir: cfg.DownloadDir,
+		Theme:       cfg.Theme,
 	})
 }
 
@@ -500,42 +507,65 @@ func cmdCacheStats(args []string) {
 
 // ── setup ─────────────────────────────────────────────────────────────────────
 
-// cmdSetup is an interactive wizard that writes ~/.pixeltui/config.json.
+// cmdSetup is an interactive form (huh) that writes ~/.pixeltui/config.json.
 func cmdSetup(_ []string) {
 	dir, err := dataDir()
 	if err != nil {
 		fatalf("%v", err)
 	}
 	cfg, _ := config.Load(dir)
-	r := bufio.NewReader(os.Stdin)
-	ask := func(label, cur string) string {
-		if cur != "" {
-			fmt.Printf("  %s [%s]: ", label, cur)
-		} else {
-			fmt.Printf("  %s: ", label)
+	if cfg.Theme == "" {
+		cfg.Theme = "default"
+	}
+	localCSV := strings.Join(cfg.LocalDirs, ", ")
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewNote().
+				Title("pixeltui setup").
+				Description("Tab/↑↓ move · Enter advances · Esc cancels.\n"),
+			huh.NewInput().
+				Title("Last.fm API key").
+				Description("Recommendations (free: last.fm/api/account/create)").
+				Placeholder("optional").
+				Value(&cfg.LastfmKey),
+			huh.NewSelect[string]().
+				Title("Theme").
+				Options(huh.NewOptions(tui.ThemeNames()...)...).
+				Value(&cfg.Theme),
+		),
+		huh.NewGroup(
+			huh.NewNote().Title("Subsonic / Navidrome").Description("Optional self-hosted source.\n"),
+			huh.NewInput().Title("Server URL").Placeholder("https://music.example.com").Value(&cfg.Subsonic.URL),
+			huh.NewInput().Title("Username").Value(&cfg.Subsonic.User),
+			huh.NewInput().Title("Password").EchoMode(huh.EchoModePassword).Value(&cfg.Subsonic.Pass),
+		),
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Local music folders").
+				Description("Comma-separated paths (optional)").
+				Value(&localCSV),
+			huh.NewInput().
+				Title("Download folder").
+				Description("Artist/Album layout for Navidrome (optional)").
+				Value(&cfg.DownloadDir),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			fmt.Println("Setup cancelled — nothing saved.")
+			return
 		}
-		line, _ := r.ReadString('\n')
-		if line = strings.TrimSpace(line); line != "" {
-			return line
-		}
-		return cur
+		fatalf("setup: %v", err)
 	}
 
-	fmt.Print("\n  pixeltui setup — Enter keeps the current value\n\n")
-	cfg.LastfmKey = ask("Last.fm API key (recommendations)", cfg.LastfmKey)
-	cfg.Subsonic.URL = ask("Subsonic/Navidrome URL (optional)", cfg.Subsonic.URL)
-	if cfg.Subsonic.URL != "" {
-		cfg.Subsonic.User = ask("  Subsonic user", cfg.Subsonic.User)
-		cfg.Subsonic.Pass = ask("  Subsonic password", cfg.Subsonic.Pass)
-	}
-	dirs := ask("Local music folders, comma-separated (optional)", strings.Join(cfg.LocalDirs, ", "))
-	cfg.LocalDirs = cfg.LocalDirs[:0]
-	for _, d := range strings.Split(dirs, ",") {
+	cfg.LocalDirs = nil
+	for _, d := range strings.Split(localCSV, ",") {
 		if d = strings.TrimSpace(d); d != "" {
 			cfg.LocalDirs = append(cfg.LocalDirs, d)
 		}
 	}
-	cfg.DownloadDir = ask("Download folder (Artist/Album layout for Navidrome)", cfg.DownloadDir)
 
 	if err := cfg.Save(dir); err != nil {
 		fatalf("save config: %v", err)
@@ -636,14 +666,17 @@ func cmdDoctor(args []string) {
 		}
 	}
 
-	green, yellow, red, dim, reset := "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
-	ok := func(label, detail string) { fmt.Printf("  %s✓%s %-14s %s\n", green, reset, label, detail) }
-	warn := func(label, detail string) {
-		fmt.Printf("  %s!%s %-14s %s%s%s\n", yellow, reset, label, dim, detail, reset)
+	dim := "\033[2m"
+	reset := "\033[0m"
+	type drow struct {
+		status int // 0 ok, 1 warn, 2 bad
+		name   string
+		detail string
 	}
-	bad := func(label, detail string) {
-		fmt.Printf("  %s✗%s %-14s %s%s%s\n", red, reset, label, dim, detail, reset)
-	}
+	var rows []drow
+	ok := func(label, detail string) { rows = append(rows, drow{0, label, detail}) }
+	warn := func(label, detail string) { rows = append(rows, drow{1, label, detail}) }
+	bad := func(label, detail string) { rows = append(rows, drow{2, label, detail}) }
 
 	dir, err := dataDir()
 	if err != nil {
@@ -651,7 +684,7 @@ func cmdDoctor(args []string) {
 	}
 	cfg, _ := config.Load(dir)
 
-	fmt.Printf("\n  %spixeltui doctor%s  (%s/%s)%s\n\n", "\033[1m", reset, runtime.GOOS, runtime.GOARCH,
+	fmt.Printf("\n  \033[1mpixeltui doctor\033[0m  (%s/%s)%s\n\n", runtime.GOOS, runtime.GOARCH,
 		map[bool]string{true: dim + "  --fix" + reset, false: ""}[fix])
 
 	// yt-dlp (required) — self-resolvable.
@@ -688,8 +721,8 @@ func cmdDoctor(args []string) {
 		fmt.Println("  → installing mpv…")
 		fixMPV(dir)
 	}
-	if p := mpvBin(); p != "" {
-		ok("mpv", "pause/seek/volume + OS Now Playing  "+dim+p+reset)
+	if mpvBin() != "" {
+		ok("mpv", "pause/seek/volume + OS Now Playing")
 	} else {
 		warn("mpv", "missing — audio plays via ffplay/afplay but no controls. Fix: pixeltui doctor --fix")
 	}
@@ -751,8 +784,33 @@ func cmdDoctor(args []string) {
 	} else {
 		warn("cache", "empty (fills on first use)")
 	}
+
+	// Render the collected checks as a table.
+	icon := map[int]string{0: "✓", 1: "!", 2: "✗"}
+	colors := map[int]lipgloss.Color{0: "10", 1: "11", 2: "9"}
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	t := table.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(dimStyle).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			if row < 0 || row >= len(rows) {
+				return lipgloss.NewStyle().Padding(0, 1)
+			}
+			s := lipgloss.NewStyle().Padding(0, 1)
+			switch col {
+			case 0:
+				return s.Foreground(colors[rows[row].status]).Bold(true).Align(lipgloss.Center)
+			case 2:
+				return s.Foreground(lipgloss.Color("250"))
+			}
+			return s
+		})
+	for _, r := range rows {
+		t.Row(icon[r.status], r.name, r.detail)
+	}
+	fmt.Println(t)
 	if !fix {
-		fmt.Printf("\n  %sRun 'pixeltui doctor --fix' to auto-resolve fixable items.%s\n", dim, reset)
+		fmt.Printf("  %sRun 'pixeltui doctor --fix' to auto-resolve fixable items.%s\n", dim, reset)
 	}
 	fmt.Println()
 }
@@ -1023,6 +1081,7 @@ CONTROLS                          (press ? in the app for this list anytime)
     del              remove            s  shuffle · r  repeat · c  clear
   Modes
     /                search the current source (YouTube / Subsonic / local)
+    '                filter the current list in place (fuzzy)
     b                browse: Liked · playlists · Local · Subsonic · save queue
                        (in browse: del = delete · p = rename a playlist)
     y                lyrics            z  autoplay        t  sleep timer
@@ -1057,7 +1116,7 @@ DOWNLOADS  (set a folder in 'pixeltui setup', then press D in the app)
 SUBSONIC  (optional 2nd source — your own Navidrome/Subsonic server)
   export PIXELTUI_SUBSONIC_URL=https://music.example.com
   export PIXELTUI_SUBSONIC_USER=you   PIXELTUI_SUBSONIC_PASS=secret
-  Then press  u  in the app. Subsonic streams play directly (no yt-dlp).
+  Then press  b  in the app (browse) and pick it. Subsonic streams play directly.
 
 DATA LAYERS                       (checked in order per query)
   1  ~/.pixeltui/graph.bin        prebuilt artist graph (instant, offline)

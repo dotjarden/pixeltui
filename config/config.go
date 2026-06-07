@@ -22,6 +22,7 @@ type Config struct {
 	Subsonic    Subsonic `json:"subsonic"`
 	LocalDirs   []string `json:"local_dirs"`   // folders of local audio files
 	DownloadDir string   `json:"download_dir"` // where downloads are saved
+	Theme       string   `json:"theme"`        // accent theme name (default if empty)
 	Explore     int      `json:"explore"`      // 0..10, default 5
 	Autoplay    bool     `json:"autoplay"`     // default true
 }
@@ -78,6 +79,9 @@ func (c *Config) applyEnv() {
 	}
 	if v, ok := os.LookupEnv("PIXELTUI_DOWNLOAD_DIR"); ok {
 		c.DownloadDir = v
+	}
+	if v, ok := os.LookupEnv("PIXELTUI_THEME"); ok {
+		c.Theme = v
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
+	"github.com/sahilm/fuzzy"
 
 	"pixeltui/download"
 	"pixeltui/engine"
@@ -47,38 +50,93 @@ func (r repeatMode) String() string {
 
 // ── palette ───────────────────────────────────────────────────────────────────
 
+// theme defines the two accent colors that give pixeltui its personality; the
+// semantic colors (text/dim/green/yellow/red/border) stay constant across themes.
+type themeDef struct {
+	accent, accent2 lipgloss.AdaptiveColor // headers/selection · secondary (now-playing, keys)
+	grad1, grad2    string                 // seek-bar gradient endpoints (hex)
+}
+
+func ac(light, dark string) lipgloss.AdaptiveColor {
+	return lipgloss.AdaptiveColor{Light: light, Dark: dark}
+}
+
+// themes is the preset registry. Pick one with `theme` in config (or PIXELTUI_THEME).
+var themes = map[string]themeDef{
+	"default": {ac("57", "141"), ac("62", "183"), "#7D56F4", "#F25D94"},   // purple → pink
+	"ocean":   {ac("31", "39"), ac("37", "45"), "#00B4D8", "#90E0EF"},     // teal/cyan
+	"matrix":  {ac("28", "46"), ac("34", "84"), "#00FF66", "#9EFFC2"},     // green
+	"amber":   {ac("130", "214"), ac("136", "222"), "#FF8C00", "#FFD166"}, // amber/gold
+	"rose":    {ac("125", "211"), ac("162", "218"), "#FF2D95", "#FF8FB1"}, // hot pink
+	"mono":    {ac("240", "250"), ac("244", "245"), "#B0B0B0", "#E0E0E0"}, // grayscale
+}
+
+// Themeable accent colors (reassigned by applyTheme).
 var (
-	cAccent  = lipgloss.AdaptiveColor{Light: "57", Dark: "141"}
-	cAccent2 = lipgloss.AdaptiveColor{Light: "62", Dark: "183"}
-	cText    = lipgloss.AdaptiveColor{Light: "236", Dark: "252"}
-	cDim     = lipgloss.AdaptiveColor{Light: "245", Dark: "243"}
-	cFaint   = lipgloss.AdaptiveColor{Light: "250", Dark: "239"}
-	cGreen   = lipgloss.AdaptiveColor{Light: "28", Dark: "84"}
-	cYellow  = lipgloss.AdaptiveColor{Light: "136", Dark: "221"}
-	cRed     = lipgloss.AdaptiveColor{Light: "160", Dark: "203"}
-	cBorder  = lipgloss.AdaptiveColor{Light: "250", Dark: "238"}
-	cBorderA = lipgloss.AdaptiveColor{Light: "57", Dark: "141"}
-
-	stTitle    = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
-	stDim      = lipgloss.NewStyle().Foreground(cDim)
-	stGreen    = lipgloss.NewStyle().Foreground(cGreen)
-	stGreenB   = lipgloss.NewStyle().Foreground(cGreen).Bold(true)
-	stYellow   = lipgloss.NewStyle().Foreground(cYellow)
-	stRed      = lipgloss.NewStyle().Foreground(cRed)
-	stText     = lipgloss.NewStyle().Foreground(cText)
-	stArtist   = lipgloss.NewStyle().Foreground(cDim)
-	stNowTitle = lipgloss.NewStyle().Foreground(cAccent2).Bold(true)
-	stSelText  = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Bold(true)
-	stSelBar   = lipgloss.NewStyle().Foreground(cAccent)
-	stHelpKey  = lipgloss.NewStyle().Foreground(cAccent2).Bold(true)
-
-	stPane = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(cBorder)
-	stPaneFocus = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(cBorderA)
+	cAccent  = ac("57", "141")
+	cAccent2 = ac("62", "183")
+	cBorderA = ac("57", "141")
+	gradA    = "#7D56F4"
+	gradB    = "#F25D94"
 )
+
+// Fixed semantic colors.
+var (
+	cText   = ac("236", "252")
+	cDim    = ac("245", "243")
+	cFaint  = ac("250", "239")
+	cGreen  = ac("28", "84")
+	cYellow = ac("136", "221")
+	cRed    = ac("160", "203")
+	cBorder = ac("250", "238")
+)
+
+// Accent-dependent styles (rebuilt by applyTheme); the rest are constant.
+var (
+	stTitle     lipgloss.Style
+	stNowTitle  lipgloss.Style
+	stSelBar    lipgloss.Style
+	stHelpKey   lipgloss.Style
+	stPaneFocus lipgloss.Style
+
+	stDim     = lipgloss.NewStyle().Foreground(cDim)
+	stGreen   = lipgloss.NewStyle().Foreground(cGreen)
+	stGreenB  = lipgloss.NewStyle().Foreground(cGreen).Bold(true)
+	stYellow  = lipgloss.NewStyle().Foreground(cYellow)
+	stRed     = lipgloss.NewStyle().Foreground(cRed)
+	stText    = lipgloss.NewStyle().Foreground(cText)
+	stArtist  = lipgloss.NewStyle().Foreground(cDim)
+	stSelText = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Bold(true)
+	stPane    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBorder)
+)
+
+func init() { applyTheme("default") }
+
+// applyTheme switches the accent palette and rebuilds accent-dependent styles.
+// Unknown names fall back to "default".
+func applyTheme(name string) {
+	t, ok := themes[name]
+	if !ok {
+		t = themes["default"]
+	}
+	cAccent, cAccent2, cBorderA = t.accent, t.accent2, t.accent
+	gradA, gradB = t.grad1, t.grad2
+	stTitle = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
+	stNowTitle = lipgloss.NewStyle().Foreground(cAccent2).Bold(true)
+	stSelBar = lipgloss.NewStyle().Foreground(cAccent)
+	stHelpKey = lipgloss.NewStyle().Foreground(cAccent2).Bold(true)
+	stPaneFocus = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBorderA)
+}
+
+// ThemeNames returns the available theme names (sorted), for setup/help.
+func ThemeNames() []string {
+	out := make([]string, 0, len(themes))
+	for n := range themes {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // ── messages ──────────────────────────────────────────────────────────────────
 
@@ -250,6 +308,7 @@ type keyMap struct {
 	// Queue (contextual) + menus + station.
 	Remove, Clr key.Binding
 	Browse      key.Binding
+	Filter      key.Binding
 	Actions     key.Binding
 	Station     key.Binding // Shift+Enter = play selection as a station
 	Help        key.Binding
@@ -289,6 +348,7 @@ func newKeyMap() keyMap {
 		Remove:  key.NewBinding(key.WithKeys("delete", "backspace"), key.WithHelp("del", "remove")),
 		Clr:     key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clear")),
 		Browse:  key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "browse")),
+		Filter:  key.NewBinding(key.WithKeys("'"), key.WithHelp("'", "filter")),
 		Actions: key.NewBinding(key.WithKeys("."), key.WithHelp(".", "actions")),
 		Station: key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("⇧↵", "station")),
 		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "all keys")),
@@ -324,7 +384,7 @@ func (c contextHelp) ShortHelp() []key.Binding {
 	if c.queueFocus {
 		return append(base, k.Next, k.Remove, k.Shuffle, k.Repeat, k.Clr, k.Actions, k.Tab, k.Help, k.Quit)
 	}
-	return append(base, k.Like, k.AddQ, k.Playlist, k.Actions, k.Search, k.Browse, k.Tab, k.Help, k.Quit)
+	return append(base, k.Like, k.AddQ, k.Playlist, k.Actions, k.Search, k.Filter, k.Browse, k.Tab, k.Help, k.Quit)
 }
 func (c contextHelp) FullHelp() [][]key.Binding { return c.k.FullHelp() }
 
@@ -341,6 +401,7 @@ type Config struct {
 	Subsonic    *subsonic.Client // 2nd source: a Subsonic/Navidrome server (optional)
 	LocalDirs   []string         // 3rd source: local audio folders (optional)
 	DownloadDir string           // where downloaded tracks are saved (optional)
+	Theme       string           // accent theme name (default/ocean/matrix/amber/rose/mono)
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -410,9 +471,10 @@ type model struct {
 
 	// Text-prompt mode (textinput is shared): "" = plain search, else a
 	// playlist op capturing a name. promptTrack/promptOld carry context.
-	promptMode  string // "savequeue" | "addtrack" | "rename"
+	promptMode  string // "savequeue" | "addtrack" | "rename" | "filter"
 	promptTrack engine.Candidate
 	promptOld   string
+	filterBack  []engine.Candidate // unfiltered discover items, while filtering
 
 	width, height int
 }
@@ -463,7 +525,7 @@ func newModel(cfg Config) model {
 		results:     mkList(toItems(cfg.Results), false),
 		queue:       mkList(nil, true),
 		search:      ti,
-		prog:        progress.New(progress.WithDefaultGradient(), progress.WithoutPercentage()),
+		prog:        progress.New(progress.WithGradient(gradA, gradB), progress.WithoutPercentage()),
 		spin:        sp,
 		help:        help.New(),
 		keys:        newKeyMap(),
@@ -714,6 +776,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		// Filter mode: Esc restores the unfiltered list.
+		if m.promptMode == "filter" {
+			m.results.SetItems(toItems(m.filterBack))
+			m.results.Select(0)
+			m.filterBack = nil
+		}
 		m.searching = false
 		m.promptMode = ""
 		m.search.Blur()
@@ -721,6 +789,15 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.search.Placeholder = "search songs, artists…"
 		return m, nil
 	case "enter":
+		// Filter mode: Enter keeps the narrowed list and closes the input.
+		if m.promptMode == "filter" {
+			m.searching = false
+			m.promptMode = ""
+			m.filterBack = nil
+			m.search.Blur()
+			m.search.Placeholder = "search songs, artists…"
+			return m, nil
+		}
 		val := strings.TrimSpace(m.search.Value())
 		m.searching = false
 		m.search.Blur()
@@ -752,7 +829,31 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.search, cmd = m.search.Update(msg)
+	if m.promptMode == "filter" {
+		m.applyFilter(m.search.Value())
+	}
 	return m, cmd
+}
+
+// applyFilter narrows the Discover list to fuzzy matches of q against the
+// backed-up unfiltered set (empty q restores everything).
+func (m *model) applyFilter(q string) {
+	if strings.TrimSpace(q) == "" {
+		m.results.SetItems(toItems(m.filterBack))
+		m.results.Select(0)
+		return
+	}
+	src := make([]string, len(m.filterBack))
+	for i, c := range m.filterBack {
+		src[i] = c.Track + " " + c.Artist
+	}
+	matches := fuzzy.Find(q, src)
+	out := make([]engine.Candidate, 0, len(matches))
+	for _, mt := range matches {
+		out = append(out, m.filterBack[mt.Index])
+	}
+	m.results.SetItems(toItems(out))
+	m.results.Select(0)
 }
 
 // startPrompt opens the text input in a playlist-op mode with a placeholder
@@ -1014,6 +1115,21 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openActions()
 	case key.Matches(msg, k.Browse):
 		return m.openBrowse()
+	case key.Matches(msg, k.Filter):
+		// Narrow the current Discover list in place (fuzzy), live as you type.
+		if m.st.focusQueue {
+			return m, nil
+		}
+		items := m.results.Items()
+		if len(items) == 0 {
+			return m, nil
+		}
+		backup := make([]engine.Candidate, len(items))
+		for i, it := range items {
+			backup[i] = it.(trackItem).c
+		}
+		m.filterBack = backup
+		return m, m.startPrompt("filter", "filter these results…", "")
 
 	// ── queue (contextual) ─────────────────────────────────────────────────────
 	case key.Matches(msg, k.Remove):
@@ -1751,13 +1867,23 @@ func (m model) viewHelpPage() string {
 	}
 
 	type row struct{ key, desc string }
-	keyCol := lipgloss.NewStyle().Width(9) // display-width aware (handles arrows)
+	keyStyle := lipgloss.NewStyle().Foreground(cAccent2).Bold(true).Align(lipgloss.Right).PaddingRight(2)
+	descStyle := lipgloss.NewStyle().Foreground(cText)
 	section := func(title string, rows []row) string {
-		lines := []string{stTitle.Render(title)}
+		t := table.New().
+			Border(lipgloss.HiddenBorder()).
+			BorderTop(false).BorderBottom(false).BorderLeft(false).BorderRight(false).
+			BorderColumn(false).BorderRow(false).
+			StyleFunc(func(_, col int) lipgloss.Style {
+				if col == 0 {
+					return keyStyle
+				}
+				return descStyle
+			})
 		for _, r := range rows {
-			lines = append(lines, "  "+keyCol.Render(stHelpKey.Render(r.key))+stText.Render(r.desc))
+			t.Row(r.key, r.desc)
 		}
-		return lipgloss.JoinVertical(lipgloss.Left, lines...)
+		return lipgloss.JoinVertical(lipgloss.Left, stTitle.Render(title), t.String())
 	}
 
 	playback := section("PLAYBACK  (always now-playing)", []row{
@@ -1786,6 +1912,7 @@ func (m model) viewHelpPage() string {
 	})
 	modes := section("VIEW & MODES", []row{
 		{"/", "search (current source)"},
+		{"'", "filter the current list"},
 		{"b", "browse · playlists · save queue"},
 		{"y", "lyrics"},
 		{"z", "autoplay toggle"},
@@ -2098,6 +2225,9 @@ func cmdArt(url string, cols, rows int) tea.Cmd {
 
 func Run(cfg Config) {
 	streamCache = cfg.URLCache // enable disk caching of resolved stream URLs
+	if cfg.Theme != "" {
+		applyTheme(cfg.Theme)
+	}
 
 	if !isTerminal(os.Stdout) {
 		for i, r := range cfg.Results {

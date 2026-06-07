@@ -4,7 +4,9 @@ A fast, minimal, cross-platform **terminal music player** — search, stream, an
 organize music from the command line, with a hybrid recommendation engine and
 first-class support for self-hosted libraries.
 
-- **Fast & tiny** — a single ~10 MB Go binary, 5 dependencies, no Electron, no daemon.
+![pixeltui demo](docs/demo.gif)
+
+- **Fast & tiny** — a single ~10 MB Go binary, minimal dependencies, no Electron, no daemon.
 - **Works anywhere** — macOS, Linux, and Windows (amd64 / arm64).
 - **Few third parties** — streams from YouTube Music out of the box; optionally
   point it at your own Subsonic/Navidrome server or a folder of local files.

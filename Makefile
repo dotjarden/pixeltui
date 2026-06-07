@@ -4,7 +4,7 @@ LDFLAGS  = -ldflags="-s -w" -trimpath
 DISTDIR  = dist
 
 .PHONY: build install uninstall release clean \
-        deps-macos deps-linux stream-setup fast-ytdlp fix-ffplay help
+        deps-macos deps-linux stream-setup fast-ytdlp fix-ffplay demo help
 
 # ── default ───────────────────────────────────────────────────────────────────
 
@@ -119,6 +119,15 @@ fast-ytdlp:
 	@"$(HOME)/.pixeltui/ytdlp-venv/bin/yt-dlp" --version >/dev/null \
 		&& echo "Done — pixeltui will auto-use it (~0.6s startup vs ~8s standalone)." \
 		|| { echo "Install failed."; exit 1; }
+
+# demo — render docs/demo.gif from demo.tape using VHS.
+# Install the toolchain once:  brew install vhs ttyd ffmpeg   (or: go install
+# github.com/charmbracelet/vhs@latest, plus ttyd + ffmpeg from your package mgr).
+demo: build
+	@command -v vhs >/dev/null 2>&1 || { echo "vhs not found — brew install vhs ttyd ffmpeg"; exit 1; }
+	@mkdir -p docs
+	vhs demo.tape
+	@echo "Wrote docs/demo.gif"
 
 # ── ffplay compat fix ─────────────────────────────────────────────────────────
 # After `brew upgrade libvpx`, the dylib filename version can jump (e.g. .11 →
