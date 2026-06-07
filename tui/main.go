@@ -908,9 +908,12 @@ func cmdDoctor(args []string) {
 		fmt.Println("  → installing mpv…")
 		fixMPV(dir)
 	}
-	if mpvBin() != "" {
+	switch mb := mpvBin(); {
+	case mb != "" && toolVersion(mb, "--version") != "?":
 		ok("mpv", "pause/seek/volume + OS Now Playing")
-	} else {
+	case mb != "":
+		bad("mpv", "found but won't run — Fix: pixeltui doctor --fix  ("+mb+")")
+	default:
 		warn("mpv", "missing — audio plays via ffplay/afplay but no controls. Fix: pixeltui doctor --fix")
 	}
 	switch {
@@ -1002,33 +1005,31 @@ func cmdDoctor(args []string) {
 	fmt.Println()
 }
 
-// fixYtdlp creates/repairs the fast pip yt-dlp venv at ~/.pixeltui/ytdlp-venv.
+// fixYtdlp installs the self-contained standalone yt-dlp binary into
+// ~/.pixeltui/bin — no Python, pip, or venv. Existing pip venvs are still
+// discovered by preferredYtdlp for back-compat; this is the universal path.
 func fixYtdlp(dir string) bool {
-	py, err := exec.LookPath("python3")
-	if err != nil {
-		py, err = exec.LookPath("python")
-	}
-	if err != nil {
-		py, err = exec.LookPath("py") // Windows Python launcher
-	}
-	if err != nil {
-		fmt.Println("    python not found — install Python 3, then retry (or 'make fast-ytdlp')")
+	asset := ytdlpAsset(runtime.GOOS, runtime.GOARCH)
+	if asset == "" {
+		fmt.Println("    no prebuilt yt-dlp for this platform — install yt-dlp manually")
 		return false
 	}
-	venv := filepath.Join(dir, "ytdlp-venv")
-	if err := exec.Command(py, "-m", "venv", "--clear", venv).Run(); err != nil {
-		fmt.Println("    venv failed:", err)
-		return false
-	}
-	pybin := filepath.Join(venv, "bin", "python")
+	name := "yt-dlp"
 	if runtime.GOOS == "windows" {
-		pybin = filepath.Join(venv, "Scripts", "python.exe")
+		name = "yt-dlp.exe"
 	}
-	if err := exec.Command(pybin, "-m", "pip", "install", "-q", "-U", "yt-dlp", "mutagen").Run(); err != nil {
-		fmt.Println("    pip install failed:", err)
+	dest := filepath.Join(binDir(dir), name)
+	url := "https://github.com/yt-dlp/yt-dlp/releases/latest/download/" + asset
+	fmt.Println("    downloading yt-dlp (self-contained)…")
+	if err := downloadBinary(url, dest); err != nil {
+		fmt.Println("    download failed:", err)
 		return false
 	}
-	fmt.Println("    yt-dlp installed.")
+	if toolVersion(dest, "--version") == "?" {
+		fmt.Println("    installed but won't run:", dest)
+		return false
+	}
+	fmt.Println("    yt-dlp installed → ~/.pixeltui/bin")
 	return true
 }
 
@@ -1064,18 +1065,32 @@ func mpvBin() string {
 func fixMPV(dir string) bool {
 	switch runtime.GOOS {
 	case "linux":
-		for _, pm := range [][]string{
+		pms := [][]string{
 			{"apt-get", "install", "-y", "mpv"}, {"dnf", "install", "-y", "mpv"},
 			{"pacman", "-S", "--noconfirm", "mpv"}, {"zypper", "install", "-y", "mpv"},
-		} {
-			if hasBin(pm[0]) {
-				fmt.Printf("    installing mpv via %s (sudo)…\n", pm[0])
-				c := exec.Command("sudo", append([]string{pm[0]}, pm[1:]...)...)
-				c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-				return c.Run() == nil
+		}
+		isRoot := os.Geteuid() == 0
+		hasSudo := hasBin("sudo")
+		for _, pm := range pms {
+			if !hasBin(pm[0]) {
+				continue
+			}
+			// apt's package list may be stale in minimal images; refresh first.
+			if pm[0] == "apt-get" {
+				upd := mpvInstallCmd(isRoot, hasSudo, []string{"apt-get", "update"})
+				u := exec.Command(upd[0], upd[1:]...)
+				u.Stdin, u.Stdout, u.Stderr = os.Stdin, os.Stdout, os.Stderr
+				u.Run() //nolint:errcheck
+			}
+			argv := mpvInstallCmd(isRoot, hasSudo, pm)
+			fmt.Printf("    installing mpv via %s…\n", pm[0])
+			c := exec.Command(argv[0], argv[1:]...)
+			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if c.Run() == nil && hasBin("mpv") {
+				return true
 			}
 		}
-		fmt.Println("    no known package manager — install mpv manually")
+		fmt.Println("    couldn't auto-install mpv — install via your package manager (apt/dnf/pacman/zypper)")
 		return false
 	case "darwin":
 		file := "mpv-latest.tar.gz"
@@ -1286,6 +1301,13 @@ func preferredYtdlp() string {
 			if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
 				return c
 			}
+		}
+		bin := filepath.Join(home, ".pixeltui", "bin", "yt-dlp")
+		if runtime.GOOS == "windows" {
+			bin = filepath.Join(home, ".pixeltui", "bin", "yt-dlp.exe")
+		}
+		if fi, err := os.Stat(bin); err == nil && !fi.IsDir() {
+			return bin
 		}
 	}
 	if p, err := exec.LookPath("yt-dlp"); err == nil {

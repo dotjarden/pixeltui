@@ -407,6 +407,13 @@ func ytdlpPath() string {
 				return cand
 			}
 		}
+		bin := filepath.Join(home, ".pixeltui", "bin", "yt-dlp")
+		if runtime.GOOS == "windows" {
+			bin = filepath.Join(home, ".pixeltui", "bin", "yt-dlp.exe")
+		}
+		if fi, err := os.Stat(bin); err == nil && !fi.IsDir() {
+			return bin
+		}
 	}
 	if p, err := exec.LookPath("yt-dlp"); err == nil {
 		return p
@@ -834,7 +841,7 @@ func ytdlpInstall() string {
 	case "darwin":
 		return "  curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp"
 	case "linux":
-		return "  curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ~/.local/bin/yt-dlp && chmod +x ~/.local/bin/yt-dlp"
+		return "  pixeltui doctor --fix   (installs a self-contained yt-dlp into ~/.pixeltui/bin)"
 	case "windows":
 		return "  winget install yt-dlp"
 	default:
