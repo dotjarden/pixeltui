@@ -163,6 +163,11 @@ type (
 		url string
 		err error
 	}
+	mediaMsg struct { // OS / hardware transport command from mpv
+		cmd    mediaCmd
+		gen    int
+		closed bool
+	}
 	preloadArmMsg struct{ key string } // debounced "preload the resting selection"
 	autoQueueMsg  struct{ results []engine.Candidate }
 	searchMsg     struct {
@@ -683,6 +688,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lyricsSynced = nil // belongs to the previous track
 
 		cmds := []tea.Cmd{cmdPoll(msg.pb, msg.gen)}
+		if c := waitMedia(msg.pb, msg.gen); c != nil {
+			cmds = append(cmds, c) // listen for OS next/prev/play-pause
+		}
 		if msg.c.ArtURL != "" && m.artWidth() > 0 {
 			cmds = append(cmds, cmdArt(msg.c.ArtURL, artCols, artRows))
 		}
@@ -707,6 +715,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.refill(msg.c))
 		}
 		return m, tea.Batch(cmds...)
+
+	case mediaMsg:
+		// OS / hardware transport command. Ignore stale (a newer track took over)
+		// or a closed channel (mpv exited); a new track resubscribes on playOKMsg.
+		if msg.closed || msg.gen != m.gen || m.now == nil {
+			return m, nil
+		}
+		switch msg.cmd {
+		case mediaNext:
+			return m, m.advanceForce() // bumps gen + plays next → resubscribes
+		case mediaPrev:
+			m.now.Restart()
+			m.position, m.posAt = 0, time.Now()
+			return m, waitMedia(m.now, m.gen)
+		case mediaPlayPause:
+			m.now.Pause()
+			m.paused = !m.paused
+			m.st.paused = m.paused
+			m.posAt = time.Now()
+			return m, waitMedia(m.now, m.gen)
+		}
+		return m, waitMedia(m.now, m.gen)
 
 	case playErrMsg:
 		m.loading = false

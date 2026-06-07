@@ -75,10 +75,12 @@ func cleanupCovers() {
 
 // playback holds one active audio stream.
 type playback struct {
-	cmd    *exec.Cmd
-	dl     *exec.Cmd // yt-dlp feeder (pipe mode only)
-	socket string    // mpv IPC socket path (empty → no IPC control)
-	ended  <-chan struct{}
+	cmd       *exec.Cmd
+	dl        *exec.Cmd // yt-dlp feeder (pipe mode only)
+	socket    string    // mpv IPC socket path (empty → no IPC control)
+	ended     <-chan struct{}
+	media     <-chan mediaCmd // OS/hardware transport commands (mpv only)
+	mediaStop func()          // tears down the media reader
 }
 
 func (p *playback) hasEnded() bool {
@@ -100,6 +102,9 @@ func (p *playback) canControl() bool {
 func (p *playback) stop() {
 	if p == nil {
 		return
+	}
+	if p.mediaStop != nil {
+		p.mediaStop()
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		p.cmd.Process.Kill() //nolint:errcheck
@@ -197,6 +202,13 @@ func (p *playback) Pause() {
 func (p *playback) Seek(s float64) {
 	if p.canControl() {
 		ipcCmd(p.socket, "seek", s, "relative")
+	}
+}
+
+// Restart seeks the current track back to the beginning (OS "previous" → restart).
+func (p *playback) Restart() {
+	if p.canControl() {
+		ipcCmd(p.socket, "seek", 0, "absolute")
 	}
 }
 func (p *playback) Volume() int {
@@ -299,7 +311,10 @@ func launchMPV(mpvPath, source, track, artist, coverPath string) (*playback, err
 		removeIPC(sock)
 		return nil, fmt.Errorf("mpv: IPC socket not ready")
 	}
-	return &playback{cmd: cmd, socket: sock, ended: watchEnded(cmd)}, nil
+	pb := &playback{cmd: cmd, socket: sock, ended: watchEnded(cmd)}
+	// Bridge OS / hardware media controls (next/prev/play-pause) to the app queue.
+	pb.media, pb.mediaStop = startMediaReader(sock)
+	return pb, nil
 }
 
 // ytExtractorArgs pins YouTube player clients for extraction speed.
@@ -683,6 +698,21 @@ func cmdPlay(c engine.Candidate, old *playback, preloadedURL string, gen int) te
 			return playErrMsg{err}
 		}
 		return playOKMsg{pb: pb, c: enriched, gen: gen}
+	}
+}
+
+// waitMedia blocks on the playback's media channel, turning an OS / hardware
+// transport command into a mediaMsg. Returns nil when there's no media channel
+// (e.g. a non-mpv fallback player). Re-issue it after each command to keep
+// listening; it reports closed=true when mpv exits.
+func waitMedia(pb *playback, gen int) tea.Cmd {
+	if pb == nil || pb.media == nil {
+		return nil
+	}
+	ch := pb.media
+	return func() tea.Msg {
+		c, ok := <-ch
+		return mediaMsg{cmd: c, gen: gen, closed: !ok}
 	}
 }
 
