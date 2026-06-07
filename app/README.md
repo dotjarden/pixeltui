@@ -44,7 +44,7 @@ pixeltui serve                      # prints a pairing QR (+ code)
 #    (for off-network use, front it with a tunnel and: pixeltui serve --url https://…)
 
 # 2. on your iPhone (connected, developer mode):
-flutter run
+flutter run -d <device-udid>        # see `flutter devices` for the id
 ```
 
 Scan the QR in the app → browse a source → tap a track. Audio plays on the phone
@@ -52,6 +52,22 @@ and keeps going in the background with lock-screen controls.
 
 YouTube playback requires `yt-dlp` + `ffmpeg` on the **server** (`pixeltui
 doctor --fix` installs them); Subsonic and local need nothing extra.
+
+## Troubleshooting
+
+- **`pod install` SSL error** (`certificate verify failed`): point Ruby at the
+  system CA bundle, then retry:
+  ```sh
+  export SSL_CERT_FILE=/etc/ssl/cert.pem
+  cd ios && pod install --repo-update && cd ..
+  ```
+- **iPhone not in the `flutter run` picker** (wireless is flaky on iOS 26):
+  target it directly — `flutter run -d <udid> --device-timeout 60` — or use USB.
+- **White screen + "Dart VM Service was not discovered"**: that's the wireless
+  *debug* attach failing, not the app. Use USB, or run release: `flutter run
+  --release -d <udid>`.
+- **"No MaterialLocalizations found"** (rare): add `flutter_localizations` (sdk)
+  and pass the Global*Localizations delegates to `AdaptiveApp`.
 
 ## Distribution
 

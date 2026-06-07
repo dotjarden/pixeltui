@@ -1,12 +1,13 @@
-import 'package:flutter/material.dart';
+import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../api.dart';
 import '../store.dart';
 import 'home_screen.dart';
 
-/// PairScreen scans the QR printed by `pixeltui serve` (or accepts manual entry)
-/// and saves the device token.
+/// PairScreen scans the QR from `pixeltui serve` (or accepts manual entry) and
+/// saves the device token.
 class PairScreen extends StatefulWidget {
   const PairScreen({super.key});
   @override
@@ -30,7 +31,7 @@ class _PairScreenState extends State<PairScreen> {
       await Store.save(base, token);
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const HomeScreen()));
+          CupertinoPageRoute(builder: (_) => const HomeScreen()));
     } catch (e) {
       setState(() {
         _error = '$e';
@@ -43,9 +44,7 @@ class _PairScreenState extends State<PairScreen> {
   void _onDetect(BarcodeCapture cap) {
     if (_handled) return;
     for (final b in cap.barcodes) {
-      final raw = b.rawValue;
-      if (raw == null) continue;
-      final u = Uri.tryParse(raw);
+      final u = Uri.tryParse(b.rawValue ?? '');
       final url = u?.queryParameters['url'];
       final code = u?.queryParameters['code'];
       if (url != null && code != null) {
@@ -56,74 +55,89 @@ class _PairScreenState extends State<PairScreen> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Pair with pixeltui')),
-      body: Column(
-        children: [
-          Expanded(child: MobileScanner(onDetect: _onDetect)),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                const Text('Scan the QR shown by `pixeltui serve`',
-                    textAlign: TextAlign.center),
-                if (_busy)
-                  const Padding(
-                      padding: EdgeInsets.only(top: 12),
-                      child: CircularProgressIndicator()),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(_error!,
-                        style: const TextStyle(color: Colors.redAccent)),
-                  ),
-                TextButton(
-                  onPressed: _busy ? null : _manual,
-                  child: const Text('Enter manually'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+  Future<void> _manual() async {
+    final res = await Navigator.of(context).push<List<String>>(
+        CupertinoPageRoute(builder: (_) => const _ManualPair()));
+    if (res != null && res.length == 2) _pair(res[0], res[1]);
   }
 
-  void _manual() {
-    final url = TextEditingController();
-    final code = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Manual pairing'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
+  @override
+  Widget build(BuildContext context) {
+    return AdaptiveScaffold(
+      appBar: AdaptiveAppBar(title: 'Pair with pixeltui'),
+      body: SafeArea(
+        child: Column(
           children: [
-            TextField(
-              controller: url,
-              decoration: const InputDecoration(
-                  labelText: 'Server URL', hintText: 'http://…:8787'),
-            ),
-            TextField(
-              controller: code,
-              decoration: const InputDecoration(labelText: 'Code'),
+            Expanded(child: MobileScanner(onDetect: _onDetect)),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  const Text('Scan the QR shown by “pixeltui serve”',
+                      textAlign: TextAlign.center),
+                  const SizedBox(height: 10),
+                  if (_busy) const CupertinoActivityIndicator(),
+                  if (_error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(_error!,
+                          style: const TextStyle(
+                              color: CupertinoColors.systemRed)),
+                    ),
+                  const SizedBox(height: 8),
+                  AdaptiveButton(
+                    onPressed: _manual,
+                    label: 'Enter manually',
+                    style: AdaptiveButtonStyle.tinted,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _pair(url.text.trim(), code.text.trim());
-            },
-            child: const Text('Pair'),
+      ),
+    );
+  }
+}
+
+class _ManualPair extends StatefulWidget {
+  const _ManualPair();
+  @override
+  State<_ManualPair> createState() => _ManualPairState();
+}
+
+class _ManualPairState extends State<_ManualPair> {
+  String _url = '';
+  String _code = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return AdaptiveScaffold(
+      appBar: AdaptiveAppBar(title: 'Manual pairing'),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              AdaptiveTextField(
+                placeholder: 'Server URL (http://…:8787)',
+                onChanged: (v) => _url = v,
+              ),
+              const SizedBox(height: 12),
+              AdaptiveTextField(
+                placeholder: 'Code',
+                onChanged: (v) => _code = v,
+              ),
+              const SizedBox(height: 20),
+              AdaptiveButton(
+                onPressed: () =>
+                    Navigator.of(context).pop([_url.trim(), _code.trim()]),
+                label: 'Pair',
+                style: AdaptiveButtonStyle.filled,
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

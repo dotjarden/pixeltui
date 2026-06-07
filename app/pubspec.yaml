@@ -4,11 +4,13 @@ publish_to: "none"
 version: 0.1.0+1
 
 environment:
-  sdk: ">=3.0.0 <4.0.0"
+  sdk: ">=3.5.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
+  adaptive_platform_ui: ^0.1.107   # native iOS 26 chrome (toolbar/tab bar) + adaptive widgets
+  cached_network_image: ^3.4.1     # fast, cached cover art
   http: ^1.2.0
   just_audio: ^0.9.40
   just_audio_background: ^0.0.1-beta.13

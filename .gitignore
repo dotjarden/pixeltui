@@ -25,5 +25,6 @@ app/macos/
 app/linux/
 app/windows/
 app/web/
+app/.idea/
 app/pubspec.lock
 *.iml
