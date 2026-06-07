@@ -27,6 +27,7 @@ first-class support for self-hosted libraries.
 - [Data directory](#data-directory)
 - [Build from source](#build-from-source)
 - [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ---
 
@@ -269,3 +270,15 @@ make help         # all targets
 Run `pixeltui doctor` — it reports the status of every dependency, your API key,
 configured sources, the graph, and the cache, and tells you exactly how to fix
 anything that's missing. Add `--fix` to auto-resolve what it can.
+
+---
+
+## License
+
+pixeltui is released under the [MIT License](LICENSE).
+
+The Go libraries compiled into the binary are all permissive (MIT / BSD-3-Clause).
+The external tools pixeltui drives — **yt-dlp**, **mpv**, and **ffmpeg** — are run
+as separate, user-installed programs; they are not bundled with or linked into
+pixeltui, so their licenses (Unlicense, GPL/LGPL) apply only to those tools. Full
+attribution and per-license details are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
