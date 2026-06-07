@@ -56,7 +56,7 @@ class _HomeTabState extends State<HomeTab> {
             () => _open('Subsonic', widget.api.subStarred)),
     ];
     return ListView(
-      padding: widget.padding.add(const EdgeInsets.symmetric(vertical: 12)),
+      padding: widget.padding.add(const EdgeInsets.only(top: 4, bottom: 12)),
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
