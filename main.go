@@ -1104,9 +1104,14 @@ func fixMPV(dir string) bool {
 		fmt.Println("    mpv installed → ~/.pixeltui/mpv.app")
 		return true
 	case "windows":
-		// Use a native Windows package manager (no stdlib 7z, no extra deps).
+		// Primary: self-contained standalone build → ~/.pixeltui/mpv (no admin,
+		// no package manager). Windows 10/11 ship `tar` (libarchive) which reads
+		// the .7z. Falls back to package managers, then manual guidance.
+		if installMpvWindows(dir) {
+			return true
+		}
 		for _, pm := range [][]string{
-			{"winget", "install", "--id", "mpv.mpv", "-e", "--silent",
+			{"winget", "install", "--id", "mpv.mpv", "-e", "--source", "winget", "--silent",
 				"--accept-package-agreements", "--accept-source-agreements"},
 			{"scoop", "install", "mpv"},
 			{"choco", "install", "mpv", "-y"},
@@ -1121,13 +1126,96 @@ func fixMPV(dir string) bool {
 				}
 			}
 		}
-		fmt.Println("    no package manager found — install mpv manually:")
-		fmt.Println("      winget install mpv.mpv   (or: scoop install mpv · choco install mpv)")
+		fmt.Println("    couldn't auto-install mpv. Options:")
+		fmt.Println("      • winget install mpv.mpv   (enable the 'winget' source if missing)")
+		fmt.Println("      • scoop install mpv        (no admin needed)")
+		fmt.Println("      • https://mpv.io/installation/  (unzip and add to PATH)")
 		return false
 	default:
 		fmt.Println("    auto-install unsupported on this OS — install mpv manually")
 		return false
 	}
+}
+
+// installMpvWindows downloads the standalone shinchiro mpv build and extracts it
+// to ~/.pixeltui/mpv using the built-in `tar` (libarchive reads .7z). Returns
+// false if tar is unavailable, the asset can't be found, or extraction fails.
+func installMpvWindows(dir string) bool {
+	if !hasBin("tar") {
+		return false // need libarchive tar for .7z
+	}
+	url := shinchiroMpvURL()
+	if url == "" {
+		return false
+	}
+	fmt.Println("    downloading mpv (standalone build)…")
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Println("    download failed:", err)
+		return false
+	}
+	defer resp.Body.Close()
+	f, err := os.CreateTemp(dir, ".mpv-*.7z")
+	if err != nil {
+		return false
+	}
+	arch := f.Name()
+	defer os.Remove(arch)
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		fmt.Println("    download failed:", err)
+		return false
+	}
+	f.Close()
+
+	dst := filepath.Join(dir, "mpv")
+	os.RemoveAll(dst)
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return false
+	}
+	fmt.Println("    extracting…")
+	c := exec.Command("tar", "-xf", arch, "-C", dst)
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		fmt.Println("    extract failed (tar can't read .7z?):", err)
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dst, "mpv.exe")); err != nil {
+		fmt.Println("    mpv.exe not found after extraction")
+		return false
+	}
+	fmt.Println("    mpv installed → ~/.pixeltui/mpv")
+	return true
+}
+
+// shinchiroMpvURL returns the download URL of the latest x86_64 mpv .7z build
+// (baseline, not -dev or -v3) from shinchiro/mpv-winbuild-cmake.
+func shinchiroMpvURL() string {
+	resp, err := http.Get("https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var rel struct {
+		Assets []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&rel) != nil {
+		return ""
+	}
+	for _, a := range rel.Assets {
+		if strings.HasPrefix(a.Name, "mpv-x86_64-") && // baseline x86_64 (excludes mpv-dev-*, mpv-i686-*, mpv-aarch64-*)
+			!strings.HasPrefix(a.Name, "mpv-x86_64-v3") && // skip the v3 (newer-CPU) variant
+			strings.HasSuffix(a.Name, ".7z") {
+			return a.URL
+		}
+	}
+	return ""
 }
 
 // findAppBundle walks root for a directory named "mpv.app".
