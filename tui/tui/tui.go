@@ -345,7 +345,7 @@ func newKeyMap() keyMap {
 		Sleep:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "sleep")),
 		Lyrics:  key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "lyrics")),
 		Auto:    key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "autoplay")),
-		Search:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+		Search:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "find")),
 		VolU:    key.NewBinding(key.WithKeys("+", "="), key.WithHelp("+", "vol+")),
 		VolD:    key.NewBinding(key.WithKeys("-", "_"), key.WithHelp("-", "vol-")),
 
@@ -465,8 +465,11 @@ type model struct {
 
 	// browse menu (unified source picker)
 	showBrowse   bool
-	browseItems  []browseEntry
+	browseItems  []browseEntry // currently displayed (filtered) entries
+	browseAll    []browseEntry // full unfiltered set (source of truth)
 	browseCursor int
+	browseFilter string // live fuzzy filter query ("/" inside browse)
+	browseSearch bool   // typing into the browse filter
 
 	// actions menu (per-track verb list, opened with '.')
 	showActions   bool
@@ -497,6 +500,10 @@ type model struct {
 	promptOld   string
 	filterBack  []engine.Candidate // unfiltered discover items, while filtering
 	localAll    []engine.Candidate // cached local index for live fuzzy "/" on the Local tab
+
+	// Unified "/" (search+filter) and "'" (filter-only) state.
+	staticList       bool // current view is a fixed list (Liked/playlist) → "/" only filters
+	searchFilterOnly bool // this session only filters (opened via ') — never fetches online
 
 	width, height int
 }
@@ -783,6 +790,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.results.SetItems(toItems(msg.results))
 		m.results.Select(0)
 		m.st.focusQueue = false
+		m.staticList = false // search results are re-searchable
 		m.status = fmt.Sprintf("%d results", len(msg.results))
 		m.isErr = false
 		// Warm the top results so whichever of the first few they pick is instant.
@@ -795,7 +803,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case browsePlaylistsMsg:
 		if m.showBrowse && len(msg) > 0 {
-			m.browseItems = append(m.browseItems, msg...)
+			m.browseAll = append(m.browseAll, msg...)
+			m.applyBrowseFilter() // keep the (possibly filtered) view in sync
 		}
 		return m, nil
 
@@ -870,50 +879,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "tab":
-		// Plain search (promptMode == ""): Tab cycles the source to search.
-		if m.promptMode == "" {
+		// Tab cycles the catalog source. From a fixed list it switches into a
+		// search context (so you can still search YouTube from e.g. Liked). Not
+		// available in a filter-only ("'") session.
+		if m.promptMode == "" && !m.searchFilterOnly {
+			m.staticList = false
 			m.searchSource = nextSource(m.searchSource, m.searchSources())
 			m.setSearchPrompt()
 			if m.searchSource == "local" {
-				m.filterLocalLive(m.search.Value()) // live fuzzy on the Local tab
+				if len(m.localAll) == 0 {
+					if all, ok := local.Cached(m.dataDir); ok {
+						m.localAll = all
+					}
+				}
+				m.filterBack = m.localAll
+			} else {
+				m.filterBack = nil // catalog: nothing offline to filter until fetched
 			}
-			return m, nil
+			m.applyFilter(m.search.Value())
 		}
 		return m, nil
 	case "esc":
-		// Filter mode: Esc restores the unfiltered list.
-		if m.promptMode == "filter" {
+		// Restore the unfiltered list (live filter/search narrowed it).
+		if m.filterBack != nil {
 			m.results.SetItems(toItems(m.filterBack))
 			m.results.Select(0)
-			m.filterBack = nil
 		}
-		m.searching = false
-		m.promptMode = ""
-		m.search.Blur()
-		m.search.Reset()
-		m.search.Prompt = "/ "
-		m.search.Placeholder = "search songs, artists…"
+		m.closeSearchInput()
 		return m, nil
 	case "enter":
-		// Filter mode: Enter keeps the narrowed list and closes the input.
-		if m.promptMode == "filter" {
-			m.searching = false
-			m.promptMode = ""
-			m.filterBack = nil
-			m.search.Blur()
-			m.search.Prompt = "/ "
-			m.search.Placeholder = "search songs, artists…"
-			return m, nil
-		}
 		val := strings.TrimSpace(m.search.Value())
-		m.searching = false
-		m.search.Blur()
-		m.search.Prompt = "/ "
-		m.search.Placeholder = "search songs, artists…"
 
-		// Playlist-name prompts capture a name instead of running a search.
-		if mode := m.promptMode; mode != "" {
-			m.promptMode = ""
+		// Playlist-name prompts capture a name instead of searching/filtering.
+		if mode := m.promptMode; mode == "savequeue" || mode == "addtrack" || mode == "rename" {
+			m.closeSearchInput()
 			if m.lib == nil || (val == "" && mode != "rename") {
 				return m, nil
 			}
@@ -928,20 +927,22 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if val == "" {
-			return m, nil
+		// Unified "/" + "'": fetch from the catalog (YouTube/Subsonic) on Enter,
+		// otherwise just keep the live-filtered list.
+		online := !m.searchFilterOnly && !m.staticList &&
+			(m.searchSource == "youtube" || m.searchSource == "subsonic")
+		m.closeSearchInput()
+		if online && val != "" {
+			m.loading = true
+			m.status = ""
+			return m, tea.Batch(m.searchCmd(val), m.spin.Tick)
 		}
-		m.loading = true
-		m.status = ""
-		return m, tea.Batch(m.searchCmd(val), m.spin.Tick)
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.search, cmd = m.search.Update(msg)
-	switch {
-	case m.promptMode == "filter":
-		m.applyFilter(m.search.Value())
-	case m.promptMode == "" && m.searchSource == "local":
-		m.filterLocalLive(m.search.Value()) // live fuzzy as you type on Local
+	if m.promptMode == "" {
+		m.applyFilter(m.search.Value()) // live fuzzy across the board
 	}
 	return m, cmd
 }
@@ -967,31 +968,63 @@ func (m *model) applyFilter(q string) {
 	m.results.Select(0)
 }
 
-// filterLocalLive live-fuzzy-filters the local library into the Discover list as
-// the user types on the Local tab — instant and offline, no Enter needed. Empty
-// query shows the whole local library.
-func (m *model) filterLocalLive(q string) {
-	if len(m.localAll) == 0 {
-		if all, ok := local.Cached(m.dataDir); ok {
-			m.localAll = all
+// closeSearchInput tears down the "/" / "'" input back to the idle state.
+func (m *model) closeSearchInput() {
+	m.searching = false
+	m.promptMode = ""
+	m.searchFilterOnly = false
+	m.filterBack = nil
+	m.search.Blur()
+	m.search.Reset()
+	m.search.Prompt = "/ "
+	m.search.Placeholder = "search songs, artists…"
+}
+
+// currentResults extracts the candidates currently shown in the Discover list.
+func (m model) currentResults() []engine.Candidate {
+	items := m.results.Items()
+	out := make([]engine.Candidate, 0, len(items))
+	for _, it := range items {
+		if ti, ok := it.(trackItem); ok {
+			out = append(out, ti.c)
 		}
 	}
-	q = strings.TrimSpace(q)
-	if q == "" {
-		m.results.SetItems(toItems(m.localAll))
-		m.results.Select(0)
-		return
+	return out
+}
+
+// openSearch opens the unified "/" (filterOnly=false) or "'" (filterOnly=true)
+// bar. Both live-fuzzy-filter the current view across the board; "/" additionally
+// fetches from the catalog (YouTube/Subsonic) on Enter. The filter base is the
+// current Discover list — or, on the Local tab, the full local index.
+func (m model) openSearch(filterOnly bool) (tea.Model, tea.Cmd) {
+	m.searching = true
+	m.promptMode = ""
+	m.searchFilterOnly = filterOnly
+	m.search.Reset()
+
+	if m.searchSource == "local" {
+		if len(m.localAll) == 0 {
+			if all, ok := local.Cached(m.dataDir); ok {
+				m.localAll = all
+			}
+		}
+		m.filterBack = m.localAll
+	} else {
+		m.filterBack = m.currentResults()
 	}
-	hay := make([]string, len(m.localAll))
-	for i, c := range m.localAll {
-		hay[i] = c.Track + " " + c.Artist
+
+	if filterOnly || m.staticList {
+		m.search.Prompt = "⌕ filter ▸ "
+		m.search.Placeholder = "filter these…"
+	} else {
+		if m.searchSource == "" {
+			m.searchSource = "youtube"
+		}
+		m.setSearchPrompt()
 	}
-	out := make([]engine.Candidate, 0, len(m.localAll))
-	for _, mt := range fuzzy.Find(q, hay) {
-		out = append(out, m.localAll[mt.Index])
-	}
-	m.results.SetItems(toItems(out))
-	m.results.Select(0)
+	m.applyFilter("") // show the full base; narrows live as you type
+	m.search.Focus()
+	return m, textinput.Blink
 }
 
 // startPrompt opens the text input in a playlist-op mode with a placeholder
@@ -1130,12 +1163,54 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Browse menu captures input: navigate, enter opens, b/esc closes.
 	if m.showBrowse {
+		// Live fuzzy filter while typing (started with "/").
+		if m.browseSearch {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.browseSearch = false
+				m.browseFilter = ""
+				m.applyBrowseFilter()
+				return m, nil
+			case tea.KeyEnter:
+				return m.selectBrowse()
+			case tea.KeyUp:
+				if m.browseCursor > 0 {
+					m.browseCursor--
+				}
+				return m, nil
+			case tea.KeyDown:
+				if m.browseCursor < len(m.browseItems)-1 {
+					m.browseCursor++
+				}
+				return m, nil
+			case tea.KeyBackspace:
+				if r := []rune(m.browseFilter); len(r) > 0 {
+					m.browseFilter = string(r[:len(r)-1])
+					m.applyBrowseFilter()
+				}
+				return m, nil
+			case tea.KeySpace:
+				m.browseFilter += " "
+				m.applyBrowseFilter()
+				return m, nil
+			case tea.KeyRunes:
+				m.browseFilter += string(msg.Runes)
+				m.applyBrowseFilter()
+				return m, nil
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, k.Browse), key.Matches(msg, k.Esc):
 			m.showBrowse = false
 			return m, nil
 		case key.Matches(msg, k.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, k.Search): // "/" — filter the browse list
+			m.browseSearch = true
+			m.browseFilter = ""
+			m.applyBrowseFilter()
+			return m, nil
 		case key.Matches(msg, k.Up):
 			if m.browseCursor > 0 {
 				m.browseCursor--
@@ -1242,20 +1317,9 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, k.Search):
-		// Plain search: prompt shows the source; Tab cycles it (handled in
-		// updateSearch). Default to the source of the page you're on.
-		if m.searchSource == "" {
-			m.searchSource = "youtube"
-		}
-		m.searching = true
-		m.promptMode = ""
-		m.search.Reset()
-		m.setSearchPrompt()
-		m.search.Focus()
-		if m.searchSource == "local" {
-			m.filterLocalLive("") // show the whole local library to start
-		}
-		return m, textinput.Blink
+		// "/" — live fuzzy filter of the current view, + Enter fetches from the
+		// catalog (YouTube/Subsonic). On a fixed list (Liked/playlist) it filters.
+		return m.openSearch(false)
 
 	case key.Matches(msg, k.Tab):
 		m.st.focusQueue = !m.st.focusQueue
@@ -1346,20 +1410,11 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.Browse):
 		return m.openBrowse()
 	case key.Matches(msg, k.Filter):
-		// Narrow the current Discover list in place (fuzzy), live as you type.
+		// "'" — filter-only: live fuzzy of the current view, never fetches online.
 		if m.st.focusQueue {
 			return m, nil
 		}
-		items := m.results.Items()
-		if len(items) == 0 {
-			return m, nil
-		}
-		backup := make([]engine.Candidate, len(items))
-		for i, it := range items {
-			backup[i] = it.(trackItem).c
-		}
-		m.filterBack = backup
-		return m, m.startPrompt("filter", "filter these results…", "")
+		return m.openSearch(true)
 
 	// ── queue (contextual) ─────────────────────────────────────────────────────
 	case key.Matches(msg, k.Remove):
@@ -1620,12 +1675,37 @@ func (m model) openBrowse() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.showBrowse = true
+	m.browseAll = items
 	m.browseItems = items
 	m.browseCursor = 0
+	m.browseFilter = ""
+	m.browseSearch = false
 	if m.sub != nil {
 		return m, cmdSubsonicPlaylists(m.sub) // append the server's playlists async
 	}
 	return m, nil
+}
+
+// applyBrowseFilter narrows browseItems to fuzzy matches of browseFilter over
+// the full set (browseAll), keeping the cursor in range.
+func (m *model) applyBrowseFilter() {
+	q := strings.TrimSpace(m.browseFilter)
+	if q == "" {
+		m.browseItems = m.browseAll
+	} else {
+		labels := make([]string, len(m.browseAll))
+		for i, e := range m.browseAll {
+			labels[i] = e.label
+		}
+		out := make([]browseEntry, 0, len(m.browseAll))
+		for _, mt := range fuzzy.Find(q, labels) {
+			out = append(out, m.browseAll[mt.Index])
+		}
+		m.browseItems = out
+	}
+	if m.browseCursor >= len(m.browseItems) {
+		m.browseCursor = maxi(0, len(m.browseItems)-1)
+	}
 }
 
 // browseSel returns the highlighted browse entry (nil if none).
@@ -1647,7 +1727,13 @@ func (m model) deleteBrowsePlaylist() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	name := e.id
-	m.browseItems = append(m.browseItems[:m.browseCursor], m.browseItems[m.browseCursor+1:]...)
+	for i, be := range m.browseAll {
+		if be.kind == "playlist" && be.id == name {
+			m.browseAll = append(m.browseAll[:i], m.browseAll[i+1:]...)
+			break
+		}
+	}
+	m.applyBrowseFilter()
 	if m.browseCursor >= len(m.browseItems) && m.browseCursor > 0 {
 		m.browseCursor--
 	}
@@ -1672,6 +1758,7 @@ func (m model) selectBrowse() (tea.Model, tea.Cmd) {
 		m.results.Select(0)
 		m.header = fmt.Sprintf("LIKED · %d", len(liked))
 		m.searchSource = ""
+		m.staticList = true // fixed list → "/" filters, doesn't fetch
 		m.status = ""
 		return m, m.preloadResultsTop(3)
 	case "playlist":
@@ -1685,10 +1772,12 @@ func (m model) selectBrowse() (tea.Model, tea.Cmd) {
 		m.results.Select(0)
 		m.header = strings.ToUpper(e.id) + fmt.Sprintf(" · %d", len(tracks))
 		m.searchSource = ""
+		m.staticList = true // fixed list → "/" filters, doesn't fetch
 		m.status = ""
 		return m, m.preloadResultsTop(3)
 	case "local":
 		m.searchSource = "local"
+		m.staticList = false // local is searchable
 		// Instant: show the cached index immediately, then refresh in the
 		// background (mtime-incremental, so it's quick even for big libraries).
 		if cached, ok := local.Cached(m.dataDir); ok {
@@ -2194,8 +2283,8 @@ func (m model) viewHelpPage() string {
 		{"c", "clear"},
 	})
 	modes := section("VIEW & MODES", []row{
-		{"/", "search · Tab switches source"},
-		{"'", "filter the current list"},
+		{"/", "find — live fuzzy filter · Tab source · ↵ search online"},
+		{"'", "filter the current list (never goes online)"},
 		{"b", "browse · playlists · save queue"},
 		{"y", "lyrics (synced when available)"},
 		{"z", "autoplay toggle"},
@@ -2226,7 +2315,14 @@ func (m model) viewBrowse() string {
 		contentH = 4
 	}
 	var b strings.Builder
-	b.WriteString(stTitle.Render("BROWSE") + "   " + stDim.Render("↵ open · d delete · p rename (playlists) · esc close") + "\n\n")
+	if m.browseSearch {
+		b.WriteString(stTitle.Render("BROWSE") + "   " + stText.Render("⌕ "+m.browseFilter) + stSelBar.Render("▏") + "\n\n")
+	} else {
+		b.WriteString(stTitle.Render("BROWSE") + "   " + stDim.Render("↵ open · / filter · d delete · p rename · esc close") + "\n\n")
+	}
+	if len(m.browseItems) == 0 {
+		b.WriteString(stDim.Render("   no matches"))
+	}
 	for i, e := range m.browseItems {
 		if i == m.browseCursor {
 			b.WriteString(stSelBar.Render("▏") + stSelText.Render(" "+e.label) + "\n")
