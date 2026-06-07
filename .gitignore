@@ -16,3 +16,6 @@
 
 # Clients (Flutter companion) — local-only, in development, not tracked yet.
 /clients/
+
+# Working docs (design specs / plans) — local-only.
+/docs/superpowers/
