@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"pixeltui/engine"
+	"github.com/dotjarden/pixeltui/engine"
 )
 
 // likedPlaylist is the reserved playlist name backing Like/Unlike/Liked.

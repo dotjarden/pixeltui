@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/lastfm"
 )
 
 // defaultSeeds is a genre-diverse starting set for BFS.
@@ -105,7 +105,7 @@ func newTokenBucket(perSec float64, burst int) *tokenBucket {
 	return tb
 }
 
-func (tb *tokenBucket) Take() { <-tb.ch }
+func (tb *tokenBucket) Take()  { <-tb.ch }
 func (tb *tokenBucket) Close() { close(tb.stop) }
 
 // BuildGraph crawls Last.fm in parallel via level-by-level BFS, building a

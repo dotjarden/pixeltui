@@ -57,7 +57,7 @@ try {
     if (Get-Command go -ErrorAction SilentlyContinue) {
         Warn "Download failed — building from source with Go ..."
         $env:GOBIN = $PREFIX
-        go install "$Repo@latest"
+        go install "github.com/$Repo@latest"
     } else {
         Bail "Could not download a release and Go is not installed.`nInstall Go (https://go.dev/dl/) or grab pixeltui.exe from:`n  https://github.com/$Repo/releases/latest"
     }

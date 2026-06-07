@@ -21,11 +21,11 @@ import (
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/sahilm/fuzzy"
 
-	"pixeltui/download"
-	"pixeltui/engine"
-	"pixeltui/library"
-	"pixeltui/local"
-	"pixeltui/subsonic"
+	"github.com/dotjarden/pixeltui/download"
+	"github.com/dotjarden/pixeltui/engine"
+	"github.com/dotjarden/pixeltui/library"
+	"github.com/dotjarden/pixeltui/local"
+	"github.com/dotjarden/pixeltui/subsonic"
 )
 
 // repeatMode cycles: off → all (loop the queue) → one (repeat track).

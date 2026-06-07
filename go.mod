@@ -1,4 +1,4 @@
-module pixeltui
+module github.com/dotjarden/pixeltui
 
 go 1.25.0
 

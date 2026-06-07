@@ -8,15 +8,15 @@ import (
 	"strings"
 	"time"
 
-	"pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/lastfm"
 )
 
 // GraphData is the on-disk format for the pre-built artist similarity graph.
 // It is gob-encoded and gzip-compressed.
 type GraphData struct {
-	Version  int
-	BuiltAt  time.Time
-	Artists  map[string]GraphArtist // key: lowercase artist name
+	Version int
+	BuiltAt time.Time
+	Artists map[string]GraphArtist // key: lowercase artist name
 }
 
 // GraphArtist holds pre-fetched similarity data for one artist.

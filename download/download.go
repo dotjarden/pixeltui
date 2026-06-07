@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"pixeltui/engine"
+	"github.com/dotjarden/pixeltui/engine"
 )
 
 // outputTemplate organises files as <dir>/Artist/Album/Title.ext with sensible
@@ -25,7 +25,7 @@ func args(dir, watchURL string, thumb bool) []string {
 		"--extractor-args", "youtube:player_client=android_vr,web",
 		"-x",                   // extract audio (keeps source codec — no quality loss)
 		"--audio-quality", "0", // best
-		"--embed-metadata",     // write artist/title/album/date tags into the file
+		"--embed-metadata", // write artist/title/album/date tags into the file
 	}
 	if thumb {
 		a = append(a, "--embed-thumbnail") // cover art (best-effort)

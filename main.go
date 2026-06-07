@@ -23,13 +23,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 
-	"pixeltui/config"
-	"pixeltui/engine"
-	"pixeltui/lastfm"
-	"pixeltui/library"
-	"pixeltui/store"
-	"pixeltui/subsonic"
-	"pixeltui/tui"
+	"github.com/dotjarden/pixeltui/config"
+	"github.com/dotjarden/pixeltui/engine"
+	"github.com/dotjarden/pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/library"
+	"github.com/dotjarden/pixeltui/store"
+	"github.com/dotjarden/pixeltui/subsonic"
+	"github.com/dotjarden/pixeltui/tui"
 )
 
 // dataDir returns (and creates) ~/.pixeltui/. If the legacy ~/.musicrec exists
@@ -966,6 +966,9 @@ func fixYtdlp(dir string) bool {
 	py, err := exec.LookPath("python3")
 	if err != nil {
 		py, err = exec.LookPath("python")
+	}
+	if err != nil {
+		py, err = exec.LookPath("py") // Windows Python launcher
 	}
 	if err != nil {
 		fmt.Println("    python not found — install Python 3, then retry (or 'make fast-ytdlp')")

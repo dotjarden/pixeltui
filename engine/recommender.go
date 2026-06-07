@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/lastfm"
 )
 
 // Recommender is the core engine. Create one per request; it holds no state between calls.

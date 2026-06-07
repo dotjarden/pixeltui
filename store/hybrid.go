@@ -1,7 +1,7 @@
 package store
 
 import (
-	"pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/lastfm"
 )
 
 // Hybrid implements engine.DataSource with a four-layer fallback chain:

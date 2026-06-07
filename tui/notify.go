@@ -9,9 +9,9 @@ import (
 // notifyNowPlaying sends a best-effort OS notification for the current track.
 // Errors are silently discarded — the notification is cosmetic, never critical.
 //
-//   darwin  → osascript: appears in Notification Centre and on the Lock Screen
-//   linux   → notify-send: shown by the desktop notification daemon (if present)
-//   windows → no-op (PowerShell toast is too slow/modal for per-track use)
+//	darwin  → osascript: appears in Notification Centre and on the Lock Screen
+//	linux   → notify-send: shown by the desktop notification daemon (if present)
+//	windows → no-op (PowerShell toast is too slow/modal for per-track use)
 func notifyNowPlaying(artist, track string) {
 	body := track + " — " + artist
 	switch runtime.GOOS {
