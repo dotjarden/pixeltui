@@ -9,7 +9,12 @@ import '../widgets.dart';
 class HomeTab extends StatefulWidget {
   final Api api;
   final void Function(String title, Future<List<Track>> Function() load) onOpen;
-  const HomeTab({super.key, required this.api, required this.onOpen});
+  final EdgeInsets padding;
+  const HomeTab(
+      {super.key,
+      required this.api,
+      required this.onOpen,
+      this.padding = EdgeInsets.zero});
   @override
   State<HomeTab> createState() => _HomeTabState();
 }
@@ -51,7 +56,7 @@ class _HomeTabState extends State<HomeTab> {
             () => _open('Subsonic', widget.api.subStarred)),
     ];
     return ListView(
-      padding: const EdgeInsets.only(top: 12, bottom: 12),
+      padding: widget.padding.add(const EdgeInsets.symmetric(vertical: 12)),
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),

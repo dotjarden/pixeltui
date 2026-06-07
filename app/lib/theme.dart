@@ -15,3 +15,9 @@ const kAccentGradient = LinearGradient(
   end: Alignment.bottomRight,
   colors: [kAccent, kAccent2],
 );
+
+// Chrome heights (content area is inset by these so nothing renders behind the
+// translucent header / tab bar / mini-player).
+const kHeaderHeight = 50.0;
+const kTabBarHeight = 54.0;
+const kMiniHeight = 64.0;

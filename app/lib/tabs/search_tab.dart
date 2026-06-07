@@ -8,7 +8,9 @@ import '../widgets.dart';
 /// SearchTab: a search field + source selector + results.
 class SearchTab extends StatefulWidget {
   final Api api;
-  const SearchTab({super.key, required this.api});
+  final EdgeInsets padding;
+  const SearchTab(
+      {super.key, required this.api, this.padding = EdgeInsets.zero});
   @override
   State<SearchTab> createState() => _SearchTabState();
 }
@@ -72,8 +74,9 @@ class _SearchTabState extends State<SearchTab> {
     };
     return Column(
         children: [
+          SizedBox(height: widget.padding.top + 8),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
             child: CupertinoSearchTextField(
               controller: _ctl,
               onSubmitted: (_) => _search(),
@@ -114,6 +117,7 @@ class _SearchTabState extends State<SearchTab> {
                     child:
                         Text('Search your music', style: TextStyle(color: kMuted)))
                 : ListView.builder(
+                    padding: EdgeInsets.only(bottom: widget.padding.bottom),
                     itemCount: _results.length,
                     itemBuilder: (c, i) => TrackTile(
                       track: _results[i],

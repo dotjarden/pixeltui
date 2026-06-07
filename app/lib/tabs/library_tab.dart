@@ -11,7 +11,12 @@ import '../widgets.dart';
 class LibraryTab extends StatefulWidget {
   final Api api;
   final void Function(String title, Future<List<Track>> Function() load) onOpen;
-  const LibraryTab({super.key, required this.api, required this.onOpen});
+  final EdgeInsets padding;
+  const LibraryTab(
+      {super.key,
+      required this.api,
+      required this.onOpen,
+      this.padding = EdgeInsets.zero});
   @override
   State<LibraryTab> createState() => _LibraryTabState();
 }
@@ -60,7 +65,7 @@ class _LibraryTabState extends State<LibraryTab> {
             () => _open('Subsonic', widget.api.subStarred)),
     ];
     return ListView(
-      padding: const EdgeInsets.only(top: 8),
+      padding: widget.padding.add(const EdgeInsets.only(top: 8)),
       children: [
         ...entries,
         if (_playlists.isNotEmpty) sectionTitle('Playlists'),

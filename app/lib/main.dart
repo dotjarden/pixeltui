@@ -1,6 +1,4 @@
-import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import 'pair_screen.dart';
@@ -28,24 +26,15 @@ class PixeltuiApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // The app is dark-only for a consistent music-app aesthetic.
-    final dark = ThemeData.dark(useMaterial3: true).copyWith(
-      scaffoldBackgroundColor: kBg,
-      colorScheme:
-          ColorScheme.fromSeed(seedColor: kAccent, brightness: Brightness.dark),
-    );
-    const cupertino = CupertinoThemeData(
-      brightness: Brightness.dark,
-      primaryColor: kAccent,
-      scaffoldBackgroundColor: kBg,
-    );
-    return AdaptiveApp(
+    return CupertinoApp(
       title: 'pixeltui',
-      themeMode: ThemeMode.dark,
-      materialDarkTheme: dark,
-      materialLightTheme: dark,
-      cupertinoDarkTheme: cupertino,
-      cupertinoLightTheme: cupertino,
+      debugShowCheckedModeBanner: false,
+      theme: const CupertinoThemeData(
+        brightness: Brightness.dark,
+        primaryColor: kAccent,
+        scaffoldBackgroundColor: kBg,
+        barBackgroundColor: kBg,
+      ),
       home: paired ? const RootShell() : const PairScreen(),
     );
   }

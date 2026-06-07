@@ -13,12 +13,14 @@ class TrackListBody extends StatefulWidget {
   final String title;
   final Api api;
   final Future<List<Track>> Function() load;
+  final EdgeInsets padding;
 
   const TrackListBody({
     super.key,
     required this.title,
     required this.api,
     required this.load,
+    this.padding = EdgeInsets.zero,
   });
 
   @override
@@ -53,32 +55,34 @@ class _TrackListBodyState extends State<TrackListBody> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Center(child: CupertinoActivityIndicator());
+    if (_loading) {
+      return Padding(
+        padding: EdgeInsets.only(top: widget.padding.top),
+        child: const Center(child: CupertinoActivityIndicator()),
+      );
+    }
     if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
+      return Padding(
+        padding: widget.padding,
+        child: Center(
           child: Text(_error!,
               textAlign: TextAlign.center,
               style: const TextStyle(color: CupertinoColors.systemRed)),
         ),
       );
     }
-    return CustomScrollView(
-      slivers: [
-        SliverToBoxAdapter(child: _header()),
-        SliverList(
-          delegate: SliverChildBuilderDelegate(
-            (context, i) => TrackTile(
-              track: _tracks[i],
-              api: widget.api,
-              onTap: () => playList(widget.api, _tracks, i),
-            ),
-            childCount: _tracks.length,
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 24)),
-      ],
+    return ListView.builder(
+      padding: widget.padding,
+      itemCount: _tracks.length + 1,
+      itemBuilder: (context, i) {
+        if (i == 0) return _header();
+        final t = _tracks[i - 1];
+        return TrackTile(
+          track: t,
+          api: widget.api,
+          onTap: () => playList(widget.api, _tracks, i - 1),
+        );
+      },
     );
   }
 
