@@ -881,7 +881,7 @@ func cmdDoctor(args []string) {
 		ver = toolVersion(yt, "--version")
 	}
 	if (yt == "" || ver == "?") && fix {
-		fmt.Println("  → installing fast yt-dlp…")
+		fmt.Println("  → installing yt-dlp…")
 		if fixYtdlp(dir) {
 			yt = preferredYtdlp()
 			ver = toolVersion(yt, "--version")
@@ -894,13 +894,13 @@ func cmdDoctor(args []string) {
 		bad("yt-dlp", "found but won't run — Fix: pixeltui doctor --fix  ("+yt+")")
 	default:
 		kind := "on PATH"
-		if strings.Contains(yt, "ytdlp-venv") {
-			kind = "pip (fast)"
+		switch {
+		case strings.Contains(yt, "ytdlp-venv"):
+			kind = "pip venv"
+		case strings.Contains(yt, ".pixeltui"):
+			kind = "bundled"
 		}
 		ok("yt-dlp", fmt.Sprintf("%s  [%s]", ver, kind))
-		if kind == "on PATH" {
-			warn("  ↳ tip", "standalone yt-dlp adds ~8s/play; 'pixeltui doctor --fix' makes it ~7× faster")
-		}
 	}
 
 	// players — mpv is self-resolvable.
