@@ -111,6 +111,20 @@ Downloads the latest release build for your platform, verifies its checksum, and
 replaces the running binary in place. (You can also just re-run the install
 one-liner, or `go install …@latest`.)
 
+### Uninstall
+
+```sh
+pixeltui uninstall            # remove the binary, data dir, and bundled yt-dlp/mpv
+pixeltui uninstall --keep-data   # keep your library + config; remove everything else
+pixeltui uninstall -y         # skip the confirmation prompt
+```
+
+A full clean by default: removes the `pixeltui` binary, the `~/.pixeltui` data
+directory (cache, graph, library, config) and the self-contained tools it
+installed there. On Windows it also strips the PATH entry the installer added.
+**mpv installed via your system package manager is left in place** (remove it
+yourself, e.g. `sudo apt-get remove mpv`).
+
 ---
 
 ## Quick start
@@ -185,6 +199,7 @@ pixeltui setup                    interactive config wizard
 pixeltui update                   self-update to the latest release
 pixeltui doctor [--fix]           check setup; --fix auto-installs/repairs deps
 pixeltui reset [target]           wipe data: cache | graph | library | config | all
+pixeltui uninstall [--keep-data]  remove pixeltui, data, and bundled tools
 pixeltui export <playlist> [file] write a playlist as XSPF (portable)
 pixeltui build-graph              build the offline recommendation graph (once)
 pixeltui cache warm --artist X    pre-fetch an artist for offline use
