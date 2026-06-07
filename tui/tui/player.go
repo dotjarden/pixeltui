@@ -314,7 +314,28 @@ func launchMPV(mpvPath, source, track, artist, coverPath string) (*playback, err
 	pb := &playback{cmd: cmd, socket: sock, ended: watchEnded(cmd)}
 	// Bridge OS / hardware media controls (next/prev/play-pause) to the app queue.
 	pb.media, pb.mediaStop = startMediaReader(sock)
+	padSkipPlaylist(sock)
 	return pb, nil
+}
+
+// padSkipPlaylist gives mpv tiny silent neighbour entries so on-screen transport
+// controls that drive mpv's playlist directly (Windows SMTC, and others that
+// bypass the input/keybind layer) have a Next/Prev to move to — otherwise mpv
+// disables those buttons on a 1-item playlist.
+//
+// Playlist becomes [silence, current, silence] with the current track at index
+// 1. Next → the trailing silence plays out (≈50ms) → mpv exits → the existing
+// auto-advance (pollMsg.ended → advance) plays the queue's next track. Prev →
+// the leading silence plays out → mpv returns to the current track from the
+// start (= restart). Both reuse paths that already work; the macOS keybind
+// bridge overrides the default NEXT/PREV input actions, so it never double-fires.
+//
+// Harmless if unsupported: if the silent source or insert-at isn't available the
+// entries simply don't enable the buttons (no worse than before).
+func padSkipPlaylist(socket string) {
+	const sentinel = "av://lavfi:anullsrc=d=0.05"        // ~50ms of silence, finite
+	ipcCmd(socket, "loadfile", sentinel, "append")       // next slot  → index 1→2
+	ipcCmd(socket, "loadfile", sentinel, "insert-at", 0) // prev slot  → current →1
 }
 
 // ytExtractorArgs pins YouTube player clients for extraction speed.
