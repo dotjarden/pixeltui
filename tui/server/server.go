@@ -20,11 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotjarden/pixeltui/engine"
-	"github.com/dotjarden/pixeltui/library"
-	"github.com/dotjarden/pixeltui/local"
-	"github.com/dotjarden/pixeltui/subsonic"
-	"github.com/dotjarden/pixeltui/ytm"
+	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/library"
+	"github.com/dotjarden/pixeltui/tui/local"
+	"github.com/dotjarden/pixeltui/tui/subsonic"
+	"github.com/dotjarden/pixeltui/tui/ytm"
 )
 
 // Config holds the server's dependencies and bind settings.

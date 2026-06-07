@@ -57,7 +57,9 @@ try {
     if (Get-Command go -ErrorAction SilentlyContinue) {
         Warn "Download failed — building from source with Go ..."
         $env:GOBIN = $PREFIX
-        go install "github.com/$Repo@latest"
+        go install "github.com/$Repo/tui@latest"
+        # The Go tree lives in ./tui, so the binary installs as tui.exe — rename it.
+        if (Test-Path "$PREFIX\tui.exe") { Move-Item -Force "$PREFIX\tui.exe" $exe }
     } else {
         Bail "Could not download a release and Go is not installed.`nInstall Go (https://go.dev/dl/) or grab pixeltui.exe from:`n  https://github.com/$Repo/releases/latest"
     }

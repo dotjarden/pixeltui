@@ -9,7 +9,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/dotjarden/pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/tui/lastfm"
 )
 
 const (

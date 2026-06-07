@@ -21,12 +21,12 @@ import (
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/sahilm/fuzzy"
 
-	"github.com/dotjarden/pixeltui/download"
-	"github.com/dotjarden/pixeltui/engine"
-	"github.com/dotjarden/pixeltui/library"
-	"github.com/dotjarden/pixeltui/local"
-	"github.com/dotjarden/pixeltui/lyrics"
-	"github.com/dotjarden/pixeltui/subsonic"
+	"github.com/dotjarden/pixeltui/tui/download"
+	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/library"
+	"github.com/dotjarden/pixeltui/tui/local"
+	"github.com/dotjarden/pixeltui/tui/lyrics"
+	"github.com/dotjarden/pixeltui/tui/subsonic"
 )
 
 // repeatMode cycles: off → all (loop the queue) → one (repeat track).

@@ -106,8 +106,10 @@ install_binary() {
 install_from_source() {
   command -v go >/dev/null 2>&1 || die "could not download a release and Go is not installed.\nInstall Go (https://go.dev/dl/) or grab a binary from:\n  https://github.com/$REPO/releases/latest"
   step "pixeltui (building from source)"
-  info "go install github.com/$REPO@latest ..."
-  GOBIN="$PREFIX" go install "github.com/$REPO@latest"
+  info "go install github.com/$REPO/tui@latest ..."
+  GOBIN="$PREFIX" go install "github.com/$REPO/tui@latest"
+  # The Go tree lives in ./tui, so the binary installs as `tui` — rename it.
+  [ -f "$PREFIX/tui" ] && mv -f "$PREFIX/tui" "$PREFIX/pixeltui"
   ok "pixeltui installed → $PREFIX/pixeltui"
 }
 

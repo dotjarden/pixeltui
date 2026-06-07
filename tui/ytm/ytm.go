@@ -14,7 +14,7 @@ import (
 
 	"github.com/raitonoberu/ytmusic"
 
-	"github.com/dotjarden/pixeltui/engine"
+	"github.com/dotjarden/pixeltui/tui/engine"
 )
 
 // Search returns up to limit song results from YouTube Music for the query.

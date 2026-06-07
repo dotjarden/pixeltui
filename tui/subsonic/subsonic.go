@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotjarden/pixeltui/engine"
+	"github.com/dotjarden/pixeltui/tui/engine"
 )
 
 const (

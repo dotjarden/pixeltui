@@ -18,9 +18,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/dotjarden/pixeltui/engine"
-	"github.com/dotjarden/pixeltui/lyrics"
-	"github.com/dotjarden/pixeltui/ytm"
+	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/lyrics"
+	"github.com/dotjarden/pixeltui/tui/ytm"
 )
 
 // ── pixelated cover-art cache (for the OS Now Playing widget) ──────────────────

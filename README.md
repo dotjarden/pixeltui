@@ -93,7 +93,7 @@ pixeltui doctor --fix
 ### With Go installed
 
 ```sh
-go install github.com/dotjarden/pixeltui@latest
+go install github.com/dotjarden/pixeltui/tui@latest   # binary installs as `tui`; rename to `pixeltui` if you like
 pixeltui doctor --fix      # install yt-dlp + mpv
 ```
 
@@ -301,15 +301,23 @@ pixeltui serve --url https://pixeltui.example.ts.net   # behind a tunnel
 - **From anywhere:** bring your own tunnel — [Tailscale](https://tailscale.com)
   is the easy, private option; pass its address with `--url`.
 
-A native companion app (Flutter) is in progress. The server is the stable,
-documented contract it builds on.
+A native companion app (Flutter) lives in `clients/flutter/` (see its own
+README). It's an optional client — the server is the stable, documented contract
+it builds on, and the terminal player works without it.
+
+## Repository layout
+
+```
+tui/              the pixeltui Go app (terminal player + `serve`) — go.mod at root
+clients/flutter/  optional Flutter companion app (removable; tui works standalone)
+```
 
 ## Build from source
 
 Requires Go 1.25+.
 
 ```sh
-make build        # → ./pixeltui
+make build        # → ./pixeltui  (builds ./tui)
 make install      # → $PREFIX/pixeltui (default /usr/local/bin)
 make release      # cross-compile for all platforms → dist/
 make help         # all targets

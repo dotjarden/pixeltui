@@ -23,14 +23,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 
-	"github.com/dotjarden/pixeltui/config"
-	"github.com/dotjarden/pixeltui/engine"
-	"github.com/dotjarden/pixeltui/lastfm"
-	"github.com/dotjarden/pixeltui/library"
-	"github.com/dotjarden/pixeltui/server"
-	"github.com/dotjarden/pixeltui/store"
-	"github.com/dotjarden/pixeltui/subsonic"
-	"github.com/dotjarden/pixeltui/tui"
+	"github.com/dotjarden/pixeltui/tui/config"
+	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/lastfm"
+	"github.com/dotjarden/pixeltui/tui/library"
+	"github.com/dotjarden/pixeltui/tui/server"
+	"github.com/dotjarden/pixeltui/tui/store"
+	"github.com/dotjarden/pixeltui/tui/subsonic"
+	"github.com/dotjarden/pixeltui/tui/tui"
 )
 
 // dataDir returns (and creates) ~/.pixeltui/. If the legacy ~/.musicrec exists

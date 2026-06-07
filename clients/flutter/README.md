@@ -11,7 +11,7 @@ anywhere via your tunnel.
 ## Build
 
 ```sh
-cd app
+cd clients/flutter
 flutter create --org net.dotjarden --platforms=ios,android .   # one-time: makes ios/ android/
 flutter pub get
 ```

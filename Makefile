@@ -9,7 +9,7 @@ DISTDIR  = dist
 # ── default ───────────────────────────────────────────────────────────────────
 
 build:
-	go build $(LDFLAGS) -o $(BINARY) .
+	go build $(LDFLAGS) -o $(BINARY) ./tui
 
 install: build
 	@mkdir -p $(PREFIX)
@@ -33,7 +33,7 @@ release:
 		out=$(DISTDIR)/pixeltui-$$os-$$arch; \
 		[ "$$os" = "windows" ] && out=$$out.exe; \
 		printf "  building %-40s" "$$out ..."; \
-		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o $$out . \
+		GOOS=$$os GOARCH=$$arch go build $(LDFLAGS) -o $$out ./tui \
 			&& echo "ok" || echo "FAILED"; \
 	done
 	@echo ""

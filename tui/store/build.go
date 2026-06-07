@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dotjarden/pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/tui/lastfm"
 )
 
 // defaultSeeds is a genre-diverse starting set for BFS.

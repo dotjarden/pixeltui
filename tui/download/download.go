@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotjarden/pixeltui/engine"
+	"github.com/dotjarden/pixeltui/tui/engine"
 )
 
 // outputTemplate organises files as <dir>/Artist/Album/Title.ext with sensible

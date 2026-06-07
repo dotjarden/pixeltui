@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotjarden/pixeltui/engine"
+	"github.com/dotjarden/pixeltui/tui/engine"
 )
 
 // Source is the routing tag stamped on every candidate from this package.

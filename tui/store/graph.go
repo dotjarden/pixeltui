@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotjarden/pixeltui/lastfm"
+	"github.com/dotjarden/pixeltui/tui/lastfm"
 )
 
 // GraphData is the on-disk format for the pre-built artist similarity graph.

@@ -14,17 +14,17 @@
 .DS_Store
 *.swp
 
-# Flutter app (generated platform projects + build output)
-app/.dart_tool/
-app/.flutter-plugins
-app/.flutter-plugins-dependencies
-app/build/
-app/ios/
-app/android/
-app/macos/
-app/linux/
-app/windows/
-app/web/
-app/.idea/
-app/pubspec.lock
+# Flutter client (generated platform projects + build output)
+clients/flutter/.dart_tool/
+clients/flutter/.flutter-plugins
+clients/flutter/.flutter-plugins-dependencies
+clients/flutter/build/
+clients/flutter/ios/
+clients/flutter/android/
+clients/flutter/macos/
+clients/flutter/linux/
+clients/flutter/windows/
+clients/flutter/web/
+clients/flutter/.idea/
+clients/flutter/pubspec.lock
 *.iml

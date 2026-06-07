@@ -1,6 +1,6 @@
 package engine
 
-import "github.com/dotjarden/pixeltui/lastfm"
+import "github.com/dotjarden/pixeltui/tui/lastfm"
 
 // DataSource abstracts where music similarity data comes from.
 // *lastfm.Client, *store.Hybrid, and any test double all satisfy this interface.
