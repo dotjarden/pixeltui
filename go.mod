@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/raitonoberu/ytmusic v0.0.0-20240324143733-0e5780514b1d
 	github.com/sahilm/fuzzy v0.1.1
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.etcd.io/bbolt v1.4.3
 )
 

@@ -282,6 +282,27 @@ kept even on `reset all`.
 
 ---
 
+## Companion server (experimental)
+
+`pixeltui serve` exposes your library and sources over HTTP so a phone (or any
+client) can browse, search, and stream from anywhere:
+
+```sh
+pixeltui serve                 # prints a pairing QR + code
+pixeltui serve --url https://pixeltui.example.ts.net   # behind a tunnel
+```
+
+- **Pairing:** scan the QR (or enter the URL + code) once; the device gets a
+  saved token. Tokens live in `~/.pixeltui/devices.json` (revocable).
+- **Transport:** REST for actions, Server-Sent Events for live state.
+- **Streaming:** Subsonic and local play directly (range-aware); YouTube
+  transcoding is on the roadmap.
+- **From anywhere:** bring your own tunnel — [Tailscale](https://tailscale.com)
+  is the easy, private option; pass its address with `--url`.
+
+A native companion app (Flutter) is in progress. The server is the stable,
+documented contract it builds on.
+
 ## Build from source
 
 Requires Go 1.25+.

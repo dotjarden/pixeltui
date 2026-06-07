@@ -27,6 +27,7 @@ import (
 	"github.com/dotjarden/pixeltui/engine"
 	"github.com/dotjarden/pixeltui/lastfm"
 	"github.com/dotjarden/pixeltui/library"
+	"github.com/dotjarden/pixeltui/server"
 	"github.com/dotjarden/pixeltui/store"
 	"github.com/dotjarden/pixeltui/subsonic"
 	"github.com/dotjarden/pixeltui/tui"
@@ -74,6 +75,9 @@ func main() {
 			return
 		case "update", "upgrade", "self-update":
 			cmdUpdate(os.Args[2:])
+			return
+		case "serve":
+			cmdServe(os.Args[2:])
 			return
 		case "build-graph":
 			cmdBuildGraph(os.Args[2:])
@@ -659,6 +663,41 @@ func cmdExport(args []string) {
 	}
 	if len(args) > 1 {
 		fmt.Fprintf(os.Stderr, "Exported %q → %s\n", args[0], args[1])
+	}
+}
+
+// ── serve ─────────────────────────────────────────────────────────────────────
+
+// cmdServe runs the HTTP server that backs the companion app: browse, search,
+// and stream your library (and sources) from anywhere via a BYO tunnel.
+func cmdServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", ":8787", "bind address")
+	urlFlag := fs.String("url", "", "public base URL advertised in the pairing QR (for tunnels)")
+	name := fs.String("name", "", "server name shown to clients (default: hostname)")
+	fs.Parse(args)
+
+	dir, err := dataDir()
+	if err != nil {
+		fatalf("%v", err)
+	}
+	cfg, _ := config.Load(dir)
+	lib, _ := library.Open(dir)
+	var sub *subsonic.Client
+	if cfg.HasSubsonic() {
+		sub = subsonic.NewClient(cfg.Subsonic.URL, cfg.Subsonic.User, cfg.Subsonic.Pass)
+	}
+	err = server.Run(server.Config{
+		DataDir:   dir,
+		Name:      *name,
+		Addr:      *addr,
+		URL:       *urlFlag,
+		Library:   lib,
+		Subsonic:  sub,
+		LocalDirs: cfg.LocalDirs,
+	})
+	if err != nil {
+		fatalf("serve: %v", err)
 	}
 }
 
@@ -1309,6 +1348,7 @@ USAGE
   pixeltui                          open the player (search-first)
   pixeltui [track] [artist]         start seeded from a track
   pixeltui setup                    interactive config (key, Subsonic, folders)
+  pixeltui serve [--addr --url]     run the server for the companion app (pair via QR)
   pixeltui update                   self-update to the latest release
   pixeltui doctor [--fix]           check setup; --fix auto-resolves what it can
   pixeltui reset [cache|graph|library|config|all]   wipe data (keeps tools)
