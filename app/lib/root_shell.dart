@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:just_audio/just_audio.dart';
@@ -161,8 +159,11 @@ class _RootShellState extends State<RootShell> {
   }
 }
 
-/// MiniPlayer: a floating Liquid-Glass capsule (frosted blur + hairline border)
-/// like the iOS 26 Apple Music bottom accessory. Tap to open the full player.
+/// MiniPlayer: native iOS 26 Liquid-Glass surfaces (AdaptiveButtonStyle.glass)
+/// grouped like the Apple Music bottom accessory — a wide capsule (tap → full
+/// player) plus a play/pause glass button. Real glass is rendered by UIKit, not
+/// a Flutter blur. Native glass can't host a nested Flutter tap target, hence
+/// the two grouped pills.
 class MiniPlayer extends StatelessWidget {
   final VoidCallback onTap;
   const MiniPlayer({super.key, required this.onTap});
@@ -175,36 +176,20 @@ class MiniPlayer extends StatelessWidget {
       builder: (context, snap) {
         final item = currentItem(snap.data);
         if (item == null) return const SizedBox.shrink();
-        return GestureDetector(
-          onTap: onTap,
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: [
-                BoxShadow(
-                    color: CupertinoColors.black.withOpacity(0.4),
-                    blurRadius: 24,
-                    offset: const Offset(0, 8)),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(20),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
-                child: Container(
-                  height: kMiniHeight,
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  decoration: BoxDecoration(
-                    // Frosted glass tint over the blurred backdrop.
-                    color: CupertinoColors.white.withOpacity(0.10),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                        color: CupertinoColors.white.withOpacity(0.16),
-                        width: 0.8),
-                  ),
+        return SizedBox(
+          height: kMiniHeight,
+          child: Row(
+            children: [
+              Expanded(
+                child: AdaptiveButton.child(
+                  onPressed: onTap,
+                  style: AdaptiveButtonStyle.glass,
+                  borderRadius: BorderRadius.circular(22),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                   child: Row(
                     children: [
-                      trackArt(item.artUri, size: 44, radius: 10),
+                      trackArt(item.artUri, size: 42, radius: 9),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Column(
@@ -227,37 +212,30 @@ class MiniPlayer extends StatelessWidget {
                           ],
                         ),
                       ),
-                      StreamBuilder<bool>(
-                        stream: player.playingStream,
-                        builder: (c, s) {
-                          final playing = s.data ?? false;
-                          return CupertinoButton(
-                            padding: const EdgeInsets.symmetric(horizontal: 6),
-                            onPressed: playing ? player.pause : player.play,
-                            child: Icon(
-                                playing
-                                    ? CupertinoIcons.pause_fill
-                                    : CupertinoIcons.play_fill,
-                                color: kText,
-                                size: 26),
-                          );
-                        },
-                      ),
-                      CupertinoButton(
-                        padding: const EdgeInsets.only(left: 2, right: 4),
-                        onPressed:
-                            player.hasNext ? player.seekToNext : null,
-                        child: Icon(CupertinoIcons.forward_fill,
-                            color: player.hasNext
-                                ? kText
-                                : kMuted.withOpacity(0.4),
-                            size: 22),
-                      ),
                     ],
                   ),
                 ),
               ),
-            ),
+              const SizedBox(width: 8),
+              StreamBuilder<bool>(
+                stream: player.playingStream,
+                builder: (c, s) {
+                  final playing = s.data ?? false;
+                  return AdaptiveButton.child(
+                    onPressed: playing ? player.pause : player.play,
+                    style: AdaptiveButtonStyle.glass,
+                    borderRadius: BorderRadius.circular(22),
+                    padding: const EdgeInsets.all(14),
+                    child: Icon(
+                        playing
+                            ? CupertinoIcons.pause_fill
+                            : CupertinoIcons.play_fill,
+                        color: kText,
+                        size: 24),
+                  );
+                },
+              ),
+            ],
           ),
         );
       },
