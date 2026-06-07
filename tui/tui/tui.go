@@ -496,6 +496,7 @@ type model struct {
 	promptTrack engine.Candidate
 	promptOld   string
 	filterBack  []engine.Candidate // unfiltered discover items, while filtering
+	localAll    []engine.Candidate // cached local index for live fuzzy "/" on the Local tab
 
 	width, height int
 }
@@ -873,6 +874,9 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.promptMode == "" {
 			m.searchSource = nextSource(m.searchSource, m.searchSources())
 			m.setSearchPrompt()
+			if m.searchSource == "local" {
+				m.filterLocalLive(m.search.Value()) // live fuzzy on the Local tab
+			}
 			return m, nil
 		}
 		return m, nil
@@ -933,8 +937,11 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.search, cmd = m.search.Update(msg)
-	if m.promptMode == "filter" {
+	switch {
+	case m.promptMode == "filter":
 		m.applyFilter(m.search.Value())
+	case m.promptMode == "" && m.searchSource == "local":
+		m.filterLocalLive(m.search.Value()) // live fuzzy as you type on Local
 	}
 	return m, cmd
 }
@@ -955,6 +962,33 @@ func (m *model) applyFilter(q string) {
 	out := make([]engine.Candidate, 0, len(matches))
 	for _, mt := range matches {
 		out = append(out, m.filterBack[mt.Index])
+	}
+	m.results.SetItems(toItems(out))
+	m.results.Select(0)
+}
+
+// filterLocalLive live-fuzzy-filters the local library into the Discover list as
+// the user types on the Local tab — instant and offline, no Enter needed. Empty
+// query shows the whole local library.
+func (m *model) filterLocalLive(q string) {
+	if len(m.localAll) == 0 {
+		if all, ok := local.Cached(m.dataDir); ok {
+			m.localAll = all
+		}
+	}
+	q = strings.TrimSpace(q)
+	if q == "" {
+		m.results.SetItems(toItems(m.localAll))
+		m.results.Select(0)
+		return
+	}
+	hay := make([]string, len(m.localAll))
+	for i, c := range m.localAll {
+		hay[i] = c.Track + " " + c.Artist
+	}
+	out := make([]engine.Candidate, 0, len(m.localAll))
+	for _, mt := range fuzzy.Find(q, hay) {
+		out = append(out, m.localAll[mt.Index])
 	}
 	m.results.SetItems(toItems(out))
 	m.results.Select(0)
@@ -1218,6 +1252,9 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.search.Reset()
 		m.setSearchPrompt()
 		m.search.Focus()
+		if m.searchSource == "local" {
+			m.filterLocalLive("") // show the whole local library to start
+		}
 		return m, textinput.Blink
 
 	case key.Matches(msg, k.Tab):
@@ -2493,12 +2530,20 @@ func cmdLocalSearch(dataDir string, dirs []string, query string) tea.Cmd {
 				return searchMsg{err: err}
 			}
 		}
-		q := strings.ToLower(query)
-		out := all[:0]
-		for _, c := range all {
-			if strings.Contains(strings.ToLower(c.Track), q) || strings.Contains(strings.ToLower(c.Artist), q) {
-				out = append(out, c)
-			}
+		q := strings.TrimSpace(query)
+		if q == "" {
+			return searchMsg{results: all}
+		}
+		// Local is our own offline index, so match it fuzzily (typo-tolerant,
+		// subsequence) and rank by score — unlike YouTube/Subsonic, whose own
+		// services do the matching server-side.
+		hay := make([]string, len(all))
+		for i, c := range all {
+			hay[i] = c.Track + " " + c.Artist
+		}
+		out := make([]engine.Candidate, 0, len(all))
+		for _, mt := range fuzzy.Find(q, hay) {
+			out = append(out, all[mt.Index])
 		}
 		return searchMsg{results: out}
 	}
