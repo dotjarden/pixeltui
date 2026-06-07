@@ -16,14 +16,23 @@ class Api {
   static String _trim(String u) =>
       u.endsWith('/') ? u.substring(0, u.length - 1) : u;
 
+  static const _timeout = Duration(seconds: 12);
+
   /// pair exchanges a session code for a durable device token.
   static Future<String> pair(String url, String code,
       {String name = 'phone'}) async {
-    final r = await http.post(
-      Uri.parse('${_trim(url)}/pair'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'code': code, 'name': name}),
-    );
+    final http.Response r;
+    try {
+      r = await http
+          .post(
+            Uri.parse('${_trim(url)}/pair'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'code': code, 'name': name}),
+          )
+          .timeout(_timeout);
+    } catch (e) {
+      throw Exception("Can't reach the server at $url — same Wi-Fi / tunnel up?");
+    }
     if (r.statusCode != 200) {
       throw Exception('Pairing failed (HTTP ${r.statusCode})');
     }
@@ -31,7 +40,13 @@ class Api {
   }
 
   Future<Map<String, dynamic>> _json(String path) async {
-    final r = await http.get(Uri.parse('$base$path'), headers: _headers);
+    final http.Response r;
+    try {
+      r = await http.get(Uri.parse('$base$path'), headers: _headers).timeout(_timeout);
+    } catch (e) {
+      throw Exception('Server unreachable — check the connection.');
+    }
+    if (r.statusCode == 401) throw Exception('Not paired — unpair and scan again.');
     if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
     return jsonDecode(r.body) as Map<String, dynamic>;
   }

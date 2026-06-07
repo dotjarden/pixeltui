@@ -70,9 +70,7 @@ class _SearchTabState extends State<SearchTab> {
       'subsonic': 'Subsonic',
       'local': 'Local'
     };
-    return SafeArea(
-      bottom: false,
-      child: Column(
+    return Column(
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
@@ -125,7 +123,6 @@ class _SearchTabState extends State<SearchTab> {
                   ),
           ),
         ],
-      ),
-    );
+      );
   }
 }

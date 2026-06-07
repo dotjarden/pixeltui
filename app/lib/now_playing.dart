@@ -7,14 +7,17 @@ import 'package:just_audio/just_audio.dart';
 import 'audio.dart';
 import 'theme.dart';
 
-/// NowPlayingScreen: full-screen player with a blurred album-art backdrop,
-/// scrubber, and transport — Apple-Music style. Pushed as a slide-up sheet.
+/// NowPlayingScreen: immersive full-screen player with a blurred album-art
+/// backdrop, properly proportioned artwork, scrubber, and transport.
 class NowPlayingScreen extends StatelessWidget {
   const NowPlayingScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     final player = AudioController.instance.player;
+    final mq = MediaQuery.of(context);
+    final artSize = (mq.size.width - 48).clamp(0.0, mq.size.height * 0.46);
+
     return StreamBuilder<SequenceState?>(
       stream: player.sequenceStateStream,
       builder: (context, snap) {
@@ -31,9 +34,9 @@ class NowPlayingScreen extends StatelessWidget {
                     fit: BoxFit.cover),
               Positioned.fill(
                 child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 60, sigmaY: 60),
-                  child: Container(
-                      color: kBg.withOpacity(art != null ? 0.5 : 1)),
+                  filter: ImageFilter.blur(sigmaX: 45, sigmaY: 45),
+                  child:
+                      Container(color: kBg.withOpacity(art != null ? 0.45 : 1)),
                 ),
               ),
               const Positioned.fill(
@@ -42,62 +45,73 @@ class NowPlayingScreen extends StatelessWidget {
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [Color(0x22000000), Color(0xEE0B0B0F)],
+                      colors: [Color(0x33000000), Color(0xF20B0B0F)],
                     ),
                   ),
                 ),
               ),
               SafeArea(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  padding: const EdgeInsets.fromLTRB(24, 6, 24, 16),
                   child: Column(
                     children: [
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4, bottom: 4),
+                      // Top bar
+                      SizedBox(
+                        height: 44,
                         child: Row(
                           children: [
                             CupertinoButton(
                               padding: EdgeInsets.zero,
+                              minSize: 36,
                               onPressed: () => Navigator.of(context).maybePop(),
                               child: const Icon(CupertinoIcons.chevron_down,
-                                  color: kText),
+                                  color: kText, size: 26),
                             ),
-                            const Spacer(),
-                            const Text('Now Playing',
-                                style: TextStyle(
-                                    color: kText,
-                                    fontWeight: FontWeight.w600)),
-                            const Spacer(),
-                            const SizedBox(width: 44),
+                            const Expanded(
+                              child: Text('NOW PLAYING',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: kMuted,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 1.2)),
+                            ),
+                            const SizedBox(width: 36),
                           ],
                         ),
                       ),
                       const Spacer(),
-                      AspectRatio(
-                        aspectRatio: 1,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(18),
-                          child: art != null
-                              ? Image(
-                                  image: CachedNetworkImageProvider(
-                                      art.toString()),
-                                  fit: BoxFit.cover)
-                              : Container(
-                                  decoration: const BoxDecoration(
-                                      gradient: kAccentGradient),
-                                  child: Icon(CupertinoIcons.music_note,
-                                      size: 96,
-                                      color:
-                                          CupertinoColors.white.withOpacity(0.9)),
-                                ),
+                      // Artwork
+                      Container(
+                        width: artSize,
+                        height: artSize,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                                color: CupertinoColors.black.withOpacity(0.5),
+                                blurRadius: 40,
+                                offset: const Offset(0, 16)),
+                          ],
                         ),
+                        clipBehavior: Clip.antiAlias,
+                        child: art != null
+                            ? Image(
+                                image:
+                                    CachedNetworkImageProvider(art.toString()),
+                                fit: BoxFit.cover)
+                            : const DecoratedBox(
+                                decoration:
+                                    BoxDecoration(gradient: kAccentGradient),
+                                child: Icon(CupertinoIcons.music_note,
+                                    size: 96, color: CupertinoColors.white)),
                       ),
                       const Spacer(),
-                      Align(
-                        alignment: Alignment.centerLeft,
+                      // Title + artist
+                      SizedBox(
+                        width: double.infinity,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(item?.title ?? 'Nothing playing',
                                 maxLines: 1,
@@ -106,20 +120,20 @@ class NowPlayingScreen extends StatelessWidget {
                                     color: kText,
                                     fontSize: 24,
                                     fontWeight: FontWeight.bold)),
-                            if ((item?.artist ?? '').isNotEmpty)
-                              Text(item!.artist!,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      color: kMuted, fontSize: 17)),
+                            const SizedBox(height: 2),
+                            Text(item?.artist ?? '',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: kMuted, fontSize: 17)),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 18),
+                      const SizedBox(height: 22),
                       const _Scrubber(),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 14),
                       _Transport(player: player),
-                      const Spacer(),
+                      const SizedBox(height: 24),
                     ],
                   ),
                 ),
@@ -139,18 +153,20 @@ class _Transport extends StatelessWidget {
   Widget _btn(IconData icon, double size, VoidCallback? onTap) =>
       CupertinoButton(
         padding: EdgeInsets.zero,
+        minSize: 0,
         onPressed: onTap,
-        child: Icon(icon, size: size, color: kText),
+        child: Icon(icon,
+            size: size,
+            color: onTap == null ? kMuted.withOpacity(0.4) : kText),
       );
 
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: [
-        _btn(CupertinoIcons.backward_fill, 36,
+        _btn(CupertinoIcons.backward_fill, 38,
             player.hasPrevious ? player.seekToPrevious : null),
-        const SizedBox(width: 36),
         StreamBuilder<bool>(
           stream: player.playingStream,
           builder: (c, s) {
@@ -159,12 +175,11 @@ class _Transport extends StatelessWidget {
                 playing
                     ? CupertinoIcons.pause_circle_fill
                     : CupertinoIcons.play_circle_fill,
-                78,
+                80,
                 playing ? player.pause : player.play);
           },
         ),
-        const SizedBox(width: 36),
-        _btn(CupertinoIcons.forward_fill, 36,
+        _btn(CupertinoIcons.forward_fill, 38,
             player.hasNext ? player.seekToNext : null),
       ],
     );
@@ -189,7 +204,6 @@ class _Scrubber extends StatelessWidget {
           children: [
             CupertinoSlider(
               value: value,
-              min: 0,
               max: max > 0 ? max : 1.0,
               activeColor: kText,
               thumbColor: kText,
@@ -197,13 +211,13 @@ class _Scrubber extends StatelessWidget {
                   player.seek(Duration(milliseconds: v.toInt())),
             ),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(_fmt(pos),
                       style: const TextStyle(color: kMuted, fontSize: 12)),
-                  Text(_fmt(dur),
+                  Text('-${_fmt(dur - pos)}',
                       style: const TextStyle(color: kMuted, fontSize: 12)),
                 ],
               ),
@@ -216,6 +230,7 @@ class _Scrubber extends StatelessWidget {
 }
 
 String _fmt(Duration d) {
+  if (d.isNegative) d = Duration.zero;
   final m = d.inMinutes;
   final s = d.inSeconds % 60;
   return '$m:${s.toString().padLeft(2, '0')}';

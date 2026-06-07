@@ -1,3 +1,4 @@
+import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
 
 import 'api.dart';
@@ -54,44 +55,36 @@ class _TrackListScreenState extends State<TrackListScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoPageScaffold(
-      backgroundColor: kBg,
-      navigationBar: CupertinoNavigationBar(
-        backgroundColor: kBg.withOpacity(0.6),
-        border: null,
-        middle: Text(widget.title,
-            style: const TextStyle(color: kText), overflow: TextOverflow.ellipsis),
-      ),
-      child: SafeArea(
-        top: false,
-        child: _loading
-            ? const Center(child: CupertinoActivityIndicator())
-            : _error != null
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Text(_error!,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: CupertinoColors.systemRed)),
-                    ),
-                  )
-                : CustomScrollView(
-                    slivers: [
-                      SliverToBoxAdapter(child: _header()),
-                      SliverList(
-                        delegate: SliverChildBuilderDelegate(
-                          (context, i) => TrackTile(
-                            track: _tracks[i],
-                            api: widget.api,
-                            onTap: () => playList(widget.api, _tracks, i),
-                          ),
-                          childCount: _tracks.length,
-                        ),
-                      ),
-                      const SliverToBoxAdapter(child: SizedBox(height: 24)),
-                    ],
+    return AdaptiveScaffold(
+      appBar: AdaptiveAppBar(title: widget.title, useNativeToolbar: true),
+      body: _loading
+          ? const Center(child: CupertinoActivityIndicator())
+          : _error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(_error!,
+                        textAlign: TextAlign.center,
+                        style:
+                            const TextStyle(color: CupertinoColors.systemRed)),
                   ),
-      ),
+                )
+              : CustomScrollView(
+                  slivers: [
+                    SliverToBoxAdapter(child: _header()),
+                    SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, i) => TrackTile(
+                          track: _tracks[i],
+                          api: widget.api,
+                          onTap: () => playList(widget.api, _tracks, i),
+                        ),
+                        childCount: _tracks.length,
+                      ),
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                  ],
+                ),
     );
   }
 

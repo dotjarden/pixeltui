@@ -62,32 +62,24 @@ class _LibraryTabState extends State<LibraryTab> {
         _row(CupertinoIcons.star_fill, 'Subsonic Starred',
             () => _open('Subsonic', widget.api.subStarred)),
     ];
-    return SafeArea(
-      bottom: false,
-      child: ListView(
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Library',
-                style: TextStyle(
-                    color: kText, fontSize: 32, fontWeight: FontWeight.bold)),
+    return ListView(
+      padding: const EdgeInsets.only(top: 8),
+      children: [
+        ...entries,
+        if (_playlists.isNotEmpty) sectionTitle('Playlists'),
+        for (final name in _playlists)
+          _row(CupertinoIcons.music_note_list, name,
+              () => _open(name, () => widget.api.playlist(name))),
+        const SizedBox(height: 24),
+        Center(
+          child: CupertinoButton(
+            onPressed: _logout,
+            child: const Text('Unpair this device',
+                style: TextStyle(color: CupertinoColors.systemRed)),
           ),
-          ...entries,
-          if (_playlists.isNotEmpty) sectionTitle('Playlists'),
-          for (final name in _playlists)
-            _row(CupertinoIcons.music_note_list, name,
-                () => _open(name, () => widget.api.playlist(name))),
-          const SizedBox(height: 24),
-          Center(
-            child: CupertinoButton(
-              onPressed: _logout,
-              child: const Text('Unpair this device',
-                  style: TextStyle(color: CupertinoColors.systemRed)),
-            ),
-          ),
-          const SizedBox(height: 16),
-        ],
-      ),
+        ),
+        const SizedBox(height: 16),
+      ],
     );
   }
 

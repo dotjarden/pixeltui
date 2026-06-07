@@ -53,34 +53,25 @@ class _HomeTabState extends State<HomeTab> {
         _card('Subsonic', CupertinoIcons.cloud_fill,
             () => _open('Subsonic', widget.api.subStarred)),
     ];
-    return SafeArea(
-      bottom: false,
-      child: ListView(
-        padding: const EdgeInsets.only(bottom: 8),
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('pixeltui',
-                style: TextStyle(
-                    color: kText, fontSize: 32, fontWeight: FontWeight.bold)),
+    return ListView(
+      padding: const EdgeInsets.only(top: 12, bottom: 12),
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: GridView.count(
+            crossAxisCount: 2,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: 2.6,
+            children: cards,
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: GridView.count(
-              crossAxisCount: 2,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: 2.6,
-              children: cards,
-            ),
-          ),
-          if (_playlists.isNotEmpty) sectionTitle('Your Playlists'),
-          for (final name in _playlists)
-            _row(name, () => _open(name, () => widget.api.playlist(name))),
-        ],
-      ),
+        ),
+        if (_playlists.isNotEmpty) sectionTitle('Your Playlists'),
+        for (final name in _playlists)
+          _row(name, () => _open(name, () => widget.api.playlist(name))),
+      ],
     );
   }
 

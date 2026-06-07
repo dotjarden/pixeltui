@@ -1,5 +1,4 @@
-import 'dart:ui';
-
+import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:just_audio/just_audio.dart';
 
@@ -13,8 +12,8 @@ import 'tabs/search_tab.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// RootShell is the music-app frame: Home/Search/Library tabs, a persistent
-/// mini-player, and a blurred bottom tab bar.
+/// RootShell is the music-app frame: a native iOS 26 liquid-glass tab bar
+/// (Home/Search/Library), a liquid-glass header, and a persistent mini-player.
 class RootShell extends StatefulWidget {
   const RootShell({super.key});
   @override
@@ -24,6 +23,7 @@ class RootShell extends StatefulWidget {
 class _RootShellState extends State<RootShell> {
   int _tab = 0;
   Api? _api;
+  static const _titles = ['Home', 'Search', 'Library'];
 
   @override
   void initState() {
@@ -40,14 +40,27 @@ class _RootShellState extends State<RootShell> {
   Widget build(BuildContext context) {
     final api = _api;
     if (api == null) {
-      return const CupertinoPageScaffold(
-        backgroundColor: kBg,
-        child: Center(child: CupertinoActivityIndicator()),
+      return AdaptiveScaffold(
+        appBar: AdaptiveAppBar(title: 'pixeltui', useNativeToolbar: true),
+        body: const Center(child: CupertinoActivityIndicator()),
       );
     }
-    return CupertinoPageScaffold(
-      backgroundColor: kBg,
-      child: Column(
+    return AdaptiveScaffold(
+      appBar: AdaptiveAppBar(title: _titles[_tab], useNativeToolbar: true),
+      bottomNavigationBar: AdaptiveBottomNavigationBar(
+        selectedIndex: _tab,
+        onTap: (i) => setState(() => _tab = i),
+        useNativeBottomBar: true,
+        items: const [
+          AdaptiveNavigationDestination(
+              icon: 'house', selectedIcon: 'house.fill', label: 'Home'),
+          AdaptiveNavigationDestination(
+              icon: 'magnifyingglass', label: 'Search'),
+          AdaptiveNavigationDestination(
+              icon: 'music.note.list', label: 'Library'),
+        ],
+      ),
+      body: Column(
         children: [
           Expanded(
             child: IndexedStack(
@@ -59,16 +72,16 @@ class _RootShellState extends State<RootShell> {
               ],
             ),
           ),
-          const _MiniPlayer(),
-          _BottomNav(index: _tab, onTap: (i) => setState(() => _tab = i)),
+          const MiniPlayer(),
         ],
       ),
     );
   }
 }
 
-class _MiniPlayer extends StatelessWidget {
-  const _MiniPlayer();
+/// MiniPlayer: persistent now-playing strip; tap to open the full player.
+class MiniPlayer extends StatelessWidget {
+  const MiniPlayer({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -82,13 +95,16 @@ class _MiniPlayer extends StatelessWidget {
           onTap: () => Navigator.of(context).push(CupertinoPageRoute(
               fullscreenDialog: true, builder: (_) => const NowPlayingScreen())),
           child: Container(
-            margin: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+            margin: const EdgeInsets.fromLTRB(8, 0, 8, 6),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-                color: kCard, borderRadius: BorderRadius.circular(12)),
+              color: kCard,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: CupertinoColors.white.withOpacity(0.06)),
+            ),
             child: Row(
               children: [
-                trackArt(item.artUri, size: 42),
+                trackArt(item.artUri, size: 44),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
@@ -99,7 +115,9 @@ class _MiniPlayer extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              color: kText, fontWeight: FontWeight.w600)),
+                              color: kText,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14)),
                       if ((item.artist ?? '').isNotEmpty)
                         Text(item.artist!,
                             maxLines: 1,
@@ -130,55 +148,6 @@ class _MiniPlayer extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _BottomNav extends StatelessWidget {
-  final int index;
-  final ValueChanged<int> onTap;
-  const _BottomNav({required this.index, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    const items = [
-      (CupertinoIcons.house_fill, 'Home'),
-      (CupertinoIcons.search, 'Search'),
-      (CupertinoIcons.music_note_list, 'Library'),
-    ];
-    final bottomInset = MediaQuery.of(context).padding.bottom;
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-        child: Container(
-          color: kBg.withOpacity(0.75),
-          padding: EdgeInsets.only(
-              top: 8, bottom: bottomInset > 0 ? bottomInset : 8),
-          child: Row(
-            children: [
-              for (var i = 0; i < items.length; i++)
-                Expanded(
-                  child: CupertinoButton(
-                    padding: EdgeInsets.zero,
-                    onPressed: () => onTap(i),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(items[i].$1,
-                            size: 24, color: i == index ? kAccent : kMuted),
-                        const SizedBox(height: 3),
-                        Text(items[i].$2,
-                            style: TextStyle(
-                                fontSize: 11,
-                                color: i == index ? kAccent : kMuted)),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
