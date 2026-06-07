@@ -1,0 +1,15 @@
+# Build artifacts
+/pixeltui
+/pixeltui.exe
+/dist/
+
+# Go build/test output
+*.out
+*.test
+
+# Tests (not shipped in this repo)
+*_test.go
+
+# OS / editor cruft
+.DS_Store
+*.swp
