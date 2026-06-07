@@ -70,6 +70,9 @@ func main() {
 		case "reset":
 			cmdReset(os.Args[2:])
 			return
+		case "uninstall":
+			cmdUninstall(os.Args[2:])
+			return
 		case "export":
 			cmdExport(os.Args[2:])
 			return
@@ -630,6 +633,132 @@ func cmdReset(args []string) {
 		}
 	}
 	fmt.Println("Done. (Installed tools — mpv, yt-dlp venv — were kept.)")
+}
+
+// ── uninstall ─────────────────────────────────────────────────────────────────
+
+// uninstallDataTargets returns the names inside the data dir to remove. With
+// keepData, the user's library and config are spared; everything else (cache,
+// graph, bundled tools) still goes.
+func uninstallDataTargets(entries []string, keepData bool) []string {
+	if !keepData {
+		return entries
+	}
+	keep := map[string]bool{"library": true, "config.json": true}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !keep[e] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// cmdUninstall removes pixeltui: the data dir (~/.pixeltui), the running binary,
+// and on Windows the PATH entry the installer added. System packages (e.g. mpv
+// from apt) are left in place. --keep-data spares the library + config; -y skips
+// the confirmation prompt.
+func cmdUninstall(args []string) {
+	keepData, yes := false, false
+	for _, a := range args {
+		switch strings.TrimLeft(a, "-") {
+		case "keep-data":
+			keepData = true
+		case "y", "yes":
+			yes = true
+		}
+	}
+
+	dir, err := dataDir()
+	if err != nil {
+		fatalf("%v", err)
+	}
+	exe, _ := os.Executable()
+	if p, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = p
+	}
+
+	fmt.Println("\n  pixeltui uninstall")
+	fmt.Println("  Will remove:")
+	if exe != "" {
+		fmt.Printf("    • binary   %s\n", exe)
+	}
+	if keepData {
+		fmt.Printf("    • data     %s  (keeping library/ and config.json)\n", dir)
+	} else {
+		fmt.Printf("    • data     %s  (everything, incl. library + config)\n", dir)
+	}
+	if runtime.GOOS == "windows" && exe != "" {
+		fmt.Printf("    • PATH entry for %s\n", filepath.Dir(exe))
+	}
+
+	if !yes {
+		fmt.Print("  Proceed? [y/N] ")
+		var c string
+		fmt.Scanln(&c) //nolint:errcheck
+		if strings.ToLower(strings.TrimSpace(c)) != "y" {
+			fmt.Println("  Aborted.")
+			return
+		}
+	}
+
+	// 1. data dir (remove targets, then the now-empty dir on a full uninstall).
+	if entries, err := os.ReadDir(dir); err == nil {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		for _, n := range uninstallDataTargets(names, keepData) {
+			os.RemoveAll(filepath.Join(dir, n)) //nolint:errcheck
+		}
+		if !keepData {
+			os.Remove(dir) //nolint:errcheck
+		}
+	}
+
+	// 2. binary (+ Windows PATH cleanup).
+	if exe != "" {
+		removeSelf(exe)
+	}
+
+	fmt.Println("\n  ✓ pixeltui uninstalled.")
+	if runtime.GOOS == "linux" {
+		fmt.Println("  Note: mpv installed via your package manager was left in place.")
+		fmt.Println("        Remove it with:  sudo apt-get remove mpv   (or dnf/pacman/zypper)")
+	}
+}
+
+// removeSelf deletes the running binary. On Unix the file can be unlinked while
+// running. On Windows a running .exe can't be deleted, so it's renamed aside,
+// the installer's PATH entry is stripped, and a detached cleaner finishes up.
+func removeSelf(exe string) {
+	if runtime.GOOS != "windows" {
+		if err := os.Remove(exe); err != nil {
+			fmt.Printf("  could not remove %s (%v)\n  finish with:  sudo rm %s\n", exe, err, exe)
+		}
+		return
+	}
+	old := exe + ".old"
+	os.Remove(old) //nolint:errcheck
+	if err := os.Rename(exe, old); err != nil {
+		fmt.Printf("  could not remove %s (%v) — delete it manually\n", exe, err)
+		return
+	}
+	binPath := filepath.Dir(exe)
+	removeWindowsPathEntry(binPath)
+	// Detached: wait for this process to exit, then delete the stub + its dir.
+	clean := fmt.Sprintf(`ping 127.0.0.1 -n 2 >nul & del /q "%s" & rmdir "%s"`, old, binPath)
+	exec.Command("cmd", "/c", clean).Start() //nolint:errcheck
+}
+
+// removeWindowsPathEntry strips dir from the User PATH (reversing what
+// install.ps1 added). Best-effort via PowerShell so no registry deps are needed.
+func removeWindowsPathEntry(dir string) {
+	ps := fmt.Sprintf(
+		`$p=([Environment]::GetEnvironmentVariable('PATH','User') -split ';' | Where-Object { $_ -and $_ -ne '%s' }) -join ';'; [Environment]::SetEnvironmentVariable('PATH',$p,'User')`,
+		dir,
+	)
+	exec.Command("powershell", "-NoProfile", "-Command", ps).Run() //nolint:errcheck
 }
 
 // ── export ──────────────────────────────────────────────────────────────────────
@@ -1374,6 +1503,7 @@ USAGE
   pixeltui update                   self-update to the latest release
   pixeltui doctor [--fix]           check setup; --fix auto-resolves what it can
   pixeltui reset [cache|graph|library|config|all]   wipe data (keeps tools)
+  pixeltui uninstall [--keep-data] [-y]             remove pixeltui + data (full clean)
   pixeltui export <playlist> [file] write a playlist as XSPF (portable)
   pixeltui build-graph              build the recommendation graph (run once)
   pixeltui cache warm --artist X    pre-fetch an artist for offline use
