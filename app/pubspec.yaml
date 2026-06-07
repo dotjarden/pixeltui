@@ -1,0 +1,23 @@
+name: pixeltui
+description: pixeltui companion — your music, from anywhere.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  just_audio: ^0.9.40
+  just_audio_background: ^0.0.1-beta.13
+  mobile_scanner: ^5.2.3
+  flutter_secure_storage: ^9.2.2
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

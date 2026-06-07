@@ -285,7 +285,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		s.proxy(w, r, s.cfg.Subsonic.StreamURL(val))
 	case "yt":
-		http.Error(w, "youtube streaming not enabled yet (coming in a later release)", http.StatusNotImplemented)
+		s.streamYouTube(w, r, val)
 	default:
 		http.Error(w, "unknown source", http.StatusBadRequest)
 	}

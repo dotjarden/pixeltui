@@ -295,8 +295,9 @@ pixeltui serve --url https://pixeltui.example.ts.net   # behind a tunnel
 - **Pairing:** scan the QR (or enter the URL + code) once; the device gets a
   saved token. Tokens live in `~/.pixeltui/devices.json` (revocable).
 - **Transport:** REST for actions, Server-Sent Events for live state.
-- **Streaming:** Subsonic and local play directly (range-aware); YouTube
-  transcoding is on the roadmap.
+- **Streaming:** Subsonic and local play directly (range-aware); YouTube is
+  transcoded to AAC on the fly (needs yt-dlp + ffmpeg, which `doctor --fix`
+  installs).
 - **From anywhere:** bring your own tunnel — [Tailscale](https://tailscale.com)
   is the easy, private option; pass its address with `--url`.
 
