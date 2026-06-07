@@ -176,6 +176,7 @@ type (
 		synced []lyrics.Line // timestamped lines (LRCLIB); empty → plain text
 		err    error
 	}
+	lyricsTickMsg      struct{}                             // drives smooth synced-lyric scrolling while open
 	browsePlaylistsMsg []browseEntry                        // Subsonic playlists fetched for the browse menu
 	localRefreshMsg    struct{ results []engine.Candidate } // background local rescan finished
 	downloadDoneMsg    struct {
@@ -183,6 +184,12 @@ type (
 		err   error
 	}
 )
+
+// lyricsResult is a cached lyrics fetch (synced and/or plain).
+type lyricsResult struct {
+	synced []lyrics.Line
+	text   string
+}
 
 // browseEntry is one row in the unified browse menu.
 type browseEntry struct {
@@ -445,9 +452,11 @@ type model struct {
 	showLyrics   bool
 	lyricsVP     viewport.Model
 	lyricsBusy   bool
-	lyricsTrack  string        // header shown above the lyrics
-	lyricsSynced []lyrics.Line // timestamped lines (karaoke view); nil → plain
-	showHelp     bool          // full shortcuts page
+	lyricsTrack  string                  // header shown above the lyrics
+	lyricsSynced []lyrics.Line           // timestamped lines (karaoke view); nil → plain
+	lyricsCache  map[string]lyricsResult // trackKey → fetched lyrics (prefetch/reopen)
+	posAt        time.Time               // wall-clock when m.position was last set (interpolation)
+	showHelp     bool                    // full shortcuts page
 
 	// browse menu (unified source picker)
 	showBrowse   bool
@@ -538,6 +547,7 @@ func newModel(cfg Config) model {
 		keys:        newKeyMap(),
 		st:          st,
 		inflight:    map[string]bool{},
+		lyricsCache: map[string]lyricsResult{},
 		autoQueue:   true,
 		volume:      -1,
 		hasMPV:      mpvAvailable(),
@@ -638,6 +648,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.position = msg.pos
+		m.posAt = time.Now() // anchor for between-poll interpolation
 		if msg.dur > 0 {
 			m.duration = msg.dur
 		}
@@ -663,11 +674,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.st.nowKey = trackKey(msg.c)
 		m.st.paused = false
 		m.position = 0
+		m.posAt = time.Now()
 		m.duration = float64(msg.c.DurationSec)
 		m.paused = false
 		m.art = nil
 		m.status = ""
 		m.isErr = false
+		m.lyricsSynced = nil // belongs to the previous track
 
 		cmds := []tea.Cmd{cmdPoll(msg.pb, msg.gen)}
 		if msg.c.ArtURL != "" && m.artWidth() > 0 {
@@ -675,6 +688,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Warm the next couple of queued tracks so auto-advance is gapless.
 		cmds = append(cmds, m.preloadQueue(2))
+		// Prefetch lyrics in the background so pressing `y` is instant.
+		if _, ok := m.lyricsCache[m.st.nowKey]; !ok {
+			cmds = append(cmds, cmdLyrics(msg.c, m.st.nowKey))
+		}
+		// If the lyrics overlay is open, refetch for the new track.
+		if m.showLyrics {
+			m.lyricsBusy = true
+			m.lyricsTrack = msg.c.Track + " — " + msg.c.Artist
+			m.lyricsVP.SetContent("")
+		}
 		go notifyNowPlaying(msg.c.Artist, msg.c.Track)
 		if m.lib != nil {
 			m.lib.AddListen(msg.c, time.Now()) // ListenBrainz-style history
@@ -774,10 +797,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case lyricsMsg:
-		m.lyricsBusy = false
-		if msg.key != m.st.nowKey { // track changed while fetching
+		// Cache for instant reopen / prefetch (success or definitive "none").
+		if msg.err == nil {
+			m.lyricsCache[msg.key] = lyricsResult{synced: msg.synced, text: msg.text}
+		}
+		// Only update the view if the overlay is open for this exact track.
+		if !m.showLyrics || msg.key != m.st.nowKey {
 			return m, nil
 		}
+		m.lyricsBusy = false
 		m.lyricsSynced = msg.synced
 		switch {
 		case len(msg.synced) > 0:
@@ -790,6 +818,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lyricsVP.SetContent(msg.text)
 		}
 		m.lyricsVP.GotoTop()
+		return m, nil
+
+	case lyricsTickMsg:
+		if m.showLyrics {
+			return m, lyricsTick() // re-arm; each tick re-renders the synced view
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1086,7 +1120,8 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Lyrics overlay captures input: close on y/esc, quit on q, else scroll.
+	// Lyrics overlay: y/esc close, q quits, transport controls still work, and
+	// (for plain lyrics only) other keys scroll the viewport.
 	if m.showLyrics {
 		switch {
 		case key.Matches(msg, k.Lyrics), key.Matches(msg, k.Esc):
@@ -1094,6 +1129,39 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, k.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, k.Pause):
+			if m.now != nil && m.hasMPV {
+				m.now.Pause()
+				m.paused = !m.paused
+				m.st.paused = m.paused
+				m.posAt = time.Now()
+			}
+			return m, nil
+		case key.Matches(msg, k.SeekL):
+			return m.seek(-10)
+		case key.Matches(msg, k.SeekR):
+			return m.seek(10)
+		case key.Matches(msg, k.Next):
+			if len(m.queue.Items()) > 0 {
+				return m, m.advanceForce()
+			}
+			return m, nil
+		case key.Matches(msg, k.VolU):
+			m.volume = mini(100, maxi(0, m.volume)+5)
+			if m.now != nil {
+				m.now.SetVolume(m.volume)
+			}
+			return m, nil
+		case key.Matches(msg, k.VolD):
+			m.volume = maxi(0, maxi(0, m.volume)-5)
+			if m.now != nil {
+				m.now.SetVolume(m.volume)
+			}
+			return m, nil
+		}
+		// Synced lyrics auto-follow; only plain lyrics need manual scrolling.
+		if len(m.lyricsSynced) > 0 {
+			return m, nil
 		}
 		var cmd tea.Cmd
 		m.lyricsVP, cmd = m.lyricsVP.Update(msg)
@@ -1625,6 +1693,7 @@ func (m model) seek(delta float64) (tea.Model, tea.Cmd) {
 	if m.duration > 0 && m.position > m.duration {
 		m.position = m.duration
 	}
+	m.posAt = time.Now() // re-anchor interpolation after the jump
 	m.seeking = true
 	return m, m.prog.SetPercent(m.ratio()) // springs to the new spot
 }
@@ -1685,12 +1754,50 @@ func (m model) toggleLyrics() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.showLyrics = true
+	m.lyricsTrack = m.nowC.Track + " — " + m.nowC.Artist
+	key := trackKey(m.nowC)
+
+	// Instant if prefetched/seen before.
+	if res, ok := m.lyricsCache[key]; ok {
+		m.lyricsBusy = false
+		m.lyricsSynced = res.synced
+		if len(res.synced) == 0 {
+			if strings.TrimSpace(res.text) == "" {
+				m.lyricsVP.SetContent("  No lyrics found for this track.")
+			} else {
+				m.lyricsVP.SetContent(res.text)
+			}
+			m.lyricsVP.GotoTop()
+		}
+		return m, lyricsTick()
+	}
+
 	m.lyricsBusy = true
 	m.lyricsSynced = nil
-	m.lyricsTrack = m.nowC.Track + " — " + m.nowC.Artist
 	m.lyricsVP.SetContent("")
 	m.lyricsVP.GotoTop()
-	return m, tea.Batch(cmdLyrics(m.nowC, trackKey(m.nowC)), m.spin.Tick)
+	return m, tea.Batch(cmdLyrics(m.nowC, key), m.spin.Tick, lyricsTick())
+}
+
+// lyricsTick re-renders the synced lyrics overlay smoothly (between 500ms polls).
+func lyricsTick() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return lyricsTickMsg{} })
+}
+
+// effectivePos estimates the true playback position between 500ms polls so the
+// synced lyric highlight tracks the audio instead of jumping twice a second.
+func (m model) effectivePos() float64 {
+	p := m.position
+	if m.now != nil && !m.paused && !m.posAt.IsZero() {
+		p += time.Since(m.posAt).Seconds()
+	}
+	if m.duration > 0 && p > m.duration {
+		p = m.duration
+	}
+	if p < 0 {
+		p = 0
+	}
+	return p
 }
 
 // replay restarts a track from the top (repeat-one).
@@ -2114,10 +2221,11 @@ func (m model) renderSyncedLyrics(height int) string {
 	if height < 1 {
 		height = 1
 	}
-	// Active line = last timestamp <= current position.
+	// Active line = last timestamp <= current (interpolated) position.
+	pos := m.effectivePos()
 	active := 0
 	for i, l := range lines {
-		if l.T <= m.position+0.15 { // tiny lead so the line flips slightly early
+		if l.T <= pos+0.15 { // tiny lead so the line flips slightly early
 			active = i
 		} else {
 			break
