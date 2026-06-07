@@ -32,15 +32,90 @@ func IsAudio(path string) bool {
 	return audioExts[strings.ToLower(filepath.Ext(path))]
 }
 
-// Scan walks each dir recursively and returns all audio files as candidates,
-// sorted by Artist then Track. Unreadable dirs/files are skipped (not fatal).
-func Scan(dirs []string) ([]engine.Candidate, error) {
-	var out []engine.Candidate
+// idxEntry is one cached file record (keyed by absolute path) persisted to
+// <dataDir>/local-index.json so re-scans can skip ffprobe for unchanged files.
+type idxEntry struct {
+	Path   string `json:"path"`
+	Artist string `json:"artist"`
+	Title  string `json:"title"`
+	Dur    int    `json:"dur"`
+	Mtime  int64  `json:"mtime"`
+}
+
+func indexPath(dataDir string) string { return filepath.Join(dataDir, "local-index.json") }
+
+func loadIndex(dataDir string) map[string]idxEntry {
+	m := map[string]idxEntry{}
+	b, err := os.ReadFile(indexPath(dataDir))
+	if err != nil {
+		return m
+	}
+	var list []idxEntry
+	if json.Unmarshal(b, &list) == nil {
+		for _, e := range list {
+			m[e.Path] = e
+		}
+	}
+	return m
+}
+
+func saveIndex(dataDir string, m map[string]idxEntry) {
+	b, err := json.Marshal(sortedEntries(m))
+	if err != nil {
+		return
+	}
+	tmp := indexPath(dataDir) + ".tmp"
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		os.Rename(tmp, indexPath(dataDir)) //nolint:errcheck
+	}
+}
+
+func sortedEntries(m map[string]idxEntry) []idxEntry {
+	list := make([]idxEntry, 0, len(m))
+	for _, e := range m {
+		list = append(list, e)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Artist != list[j].Artist {
+			return list[i].Artist < list[j].Artist
+		}
+		return list[i].Title < list[j].Title
+	})
+	return list
+}
+
+func entriesToCandidates(list []idxEntry) []engine.Candidate {
+	out := make([]engine.Candidate, len(list))
+	for i, e := range list {
+		out[i] = engine.Candidate{
+			Track: e.Title, Artist: e.Artist, DurationSec: e.Dur,
+			Source: Source, StreamURL: e.Path, // player opens the path directly
+		}
+	}
+	return out
+}
+
+// Cached returns the persisted index as candidates without walking the disk —
+// instant. ok is false if no index has been built yet (first-ever open).
+func Cached(dataDir string) (out []engine.Candidate, ok bool) {
+	m := loadIndex(dataDir)
+	if len(m) == 0 {
+		return nil, false
+	}
+	return entriesToCandidates(sortedEntries(m)), true
+}
+
+// Scan walks dirs and returns all audio files as candidates (sorted by Artist
+// then Track), persisting a metadata index at <dataDir>/local-index.json. Files
+// unchanged since the last scan (same mtime) reuse cached metadata, so repeat
+// scans skip ffprobe and are near-instant even for large libraries. Unreadable
+// dirs/files are skipped (not fatal).
+func Scan(dataDir string, dirs []string) ([]engine.Candidate, error) {
+	old := loadIndex(dataDir)
+	next := make(map[string]idxEntry, len(old))
 	for _, dir := range dirs {
-		// WalkDir keeps going on errors thanks to the fn below returning nil.
 		filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				// Unreadable dir/file: skip this entry, keep walking siblings.
 				if d != nil && d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -53,29 +128,21 @@ func Scan(dirs []string) ([]engine.Candidate, error) {
 			if aerr != nil {
 				abs = path
 			}
-			out = append(out, candidateFor(abs))
+			var mt int64
+			if info, ierr := d.Info(); ierr == nil {
+				mt = info.ModTime().Unix()
+			}
+			if e, ok := old[abs]; ok && e.Mtime == mt {
+				next[abs] = e // unchanged → reuse cached metadata (no ffprobe)
+				return nil
+			}
+			artist, title, dur := metadata(abs)
+			next[abs] = idxEntry{Path: abs, Artist: artist, Title: title, Dur: dur, Mtime: mt}
 			return nil
 		})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Artist != out[j].Artist {
-			return out[i].Artist < out[j].Artist
-		}
-		return out[i].Track < out[j].Track
-	})
-	return out, nil
-}
-
-// candidateFor builds a playable candidate for one absolute audio file path.
-func candidateFor(abs string) engine.Candidate {
-	artist, title, dur := metadata(abs)
-	return engine.Candidate{
-		Track:       title,
-		Artist:      artist,
-		DurationSec: dur,
-		Source:      Source,
-		StreamURL:   abs, // player opens the file path directly
-	}
+	saveIndex(dataDir, next)
+	return entriesToCandidates(sortedEntries(next)), nil
 }
 
 // metadata returns (artist, title, durationSec) for a file. It prefers ffprobe

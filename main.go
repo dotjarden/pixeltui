@@ -211,6 +211,7 @@ func cmdRecommend(args []string) {
 			LocalDirs:   cfg.LocalDirs,
 			DownloadDir: cfg.DownloadDir,
 			Theme:       cfg.Theme,
+			DataDir:     dir,
 		})
 		return
 	}
@@ -306,6 +307,7 @@ func cmdRecommend(args []string) {
 		LocalDirs:   cfg.LocalDirs,
 		DownloadDir: cfg.DownloadDir,
 		Theme:       cfg.Theme,
+		DataDir:     dir,
 	})
 }
 

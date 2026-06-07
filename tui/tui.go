@@ -174,7 +174,8 @@ type (
 		text string
 		err  error
 	}
-	browsePlaylistsMsg []browseEntry // Subsonic playlists fetched for the browse menu
+	browsePlaylistsMsg []browseEntry                        // Subsonic playlists fetched for the browse menu
+	localRefreshMsg    struct{ results []engine.Candidate } // background local rescan finished
 	downloadDoneMsg    struct {
 		track string
 		err   error
@@ -403,6 +404,7 @@ type Config struct {
 	LocalDirs   []string         // 3rd source: local audio folders (optional)
 	DownloadDir string           // where downloaded tracks are saved (optional)
 	Theme       string           // accent theme name (default/ocean/matrix/amber/rose/mono)
+	DataDir     string           // ~/.pixeltui (for caches like the local index)
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -468,6 +470,7 @@ type model struct {
 	sub          *subsonic.Client
 	localDirs    []string
 	downloadDir  string
+	dataDir      string
 	searchSource string // "" = YouTube, "subsonic", "local" — what / searches
 
 	// Text-prompt mode (textinput is shared): "" = plain search, else a
@@ -544,6 +547,7 @@ func newModel(cfg Config) model {
 		sub:         cfg.Subsonic,
 		localDirs:   cfg.LocalDirs,
 		downloadDir: cfg.DownloadDir,
+		dataDir:     cfg.DataDir,
 	}
 
 	// Restore the previous session's queue (Up Next) so it survives restarts.
@@ -748,6 +752,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case localRefreshMsg:
+		// Quietly swap in the refreshed index, but only if the user is still on
+		// the Local view (and not mid-search/filter), to avoid clobbering them.
+		if m.searchSource == "local" && !m.searching &&
+			strings.HasPrefix(m.header, "LOCAL FILES") && len(msg.results) > 0 {
+			sel := m.results.Index()
+			m.results.SetItems(toItems(msg.results))
+			if sel >= len(msg.results) {
+				sel = len(msg.results) - 1
+			}
+			m.results.Select(sel)
+			m.header = fmt.Sprintf("LOCAL FILES · %d", len(msg.results))
+			if m.status == "refreshing…" {
+				m.status = ""
+			}
+		}
+		return m, nil
+
 	case lyricsMsg:
 		m.lyricsBusy = false
 		if msg.key != m.st.nowKey { // track changed while fetching
@@ -917,7 +939,7 @@ func (m model) searchCmd(query string) tea.Cmd {
 		}
 	case "local":
 		if len(m.localDirs) > 0 {
-			return cmdLocalSearch(m.localDirs, query)
+			return cmdLocalSearch(m.dataDir, m.localDirs, query)
 		}
 	}
 	return cmdSearch(query) // YouTube Music (default)
@@ -1461,11 +1483,22 @@ func (m model) selectBrowse() (tea.Model, tea.Cmd) {
 		m.status = ""
 		return m, m.preloadResultsTop(3)
 	case "local":
+		m.searchSource = "local"
+		// Instant: show the cached index immediately, then refresh in the
+		// background (mtime-incremental, so it's quick even for big libraries).
+		if cached, ok := local.Cached(m.dataDir); ok {
+			m.results.SetItems(toItems(cached))
+			m.results.Select(0)
+			m.header = fmt.Sprintf("LOCAL FILES · %d", len(cached))
+			m.status = "refreshing…"
+			m.isErr = false
+			return m, tea.Batch(m.preloadResultsTop(3), cmdLocalRefresh(m.dataDir, m.localDirs))
+		}
+		// First-ever open: full scan with a spinner.
 		m.loading = true
 		m.status = "Scanning local library…"
 		m.header = "LOCAL FILES"
-		m.searchSource = "local"
-		return m, tea.Batch(cmdLocalScan(m.localDirs), m.spin.Tick)
+		return m, tea.Batch(cmdLocalScan(m.dataDir, m.localDirs), m.spin.Tick)
 	case "substarred":
 		m.loading = true
 		m.status = "Loading Subsonic…"
@@ -2157,11 +2190,21 @@ func cmdDownload(c engine.Candidate, dir string) tea.Cmd {
 	}
 }
 
-// cmdLocalScan indexes the configured local audio folders.
-func cmdLocalScan(dirs []string) tea.Cmd {
+// cmdLocalScan (re)indexes the local folders, reusing cached metadata for
+// unchanged files. Returned as a searchMsg (used on first-ever open).
+func cmdLocalScan(dataDir string, dirs []string) tea.Cmd {
 	return func() tea.Msg {
-		results, err := local.Scan(dirs)
+		results, err := local.Scan(dataDir, dirs)
 		return searchMsg{results: results, err: err}
+	}
+}
+
+// cmdLocalRefresh rescans in the background and reports the result as a
+// localRefreshMsg, so an instant cached view can be quietly updated.
+func cmdLocalRefresh(dataDir string, dirs []string) tea.Cmd {
+	return func() tea.Msg {
+		results, _ := local.Scan(dataDir, dirs)
+		return localRefreshMsg{results: results}
 	}
 }
 
@@ -2173,12 +2216,16 @@ func cmdSubsonicSearch(sub *subsonic.Client, query string) tea.Cmd {
 	}
 }
 
-// cmdLocalSearch scans the local folders and filters by query (substring).
-func cmdLocalSearch(dirs []string, query string) tea.Cmd {
+// cmdLocalSearch filters the local library by query (substring). Uses the cached
+// index when available (instant); falls back to a scan on first use.
+func cmdLocalSearch(dataDir string, dirs []string, query string) tea.Cmd {
 	return func() tea.Msg {
-		all, err := local.Scan(dirs)
-		if err != nil {
-			return searchMsg{err: err}
+		all, ok := local.Cached(dataDir)
+		if !ok {
+			var err error
+			if all, err = local.Scan(dataDir, dirs); err != nil {
+				return searchMsg{err: err}
+			}
 		}
 		q := strings.ToLower(query)
 		out := all[:0]
