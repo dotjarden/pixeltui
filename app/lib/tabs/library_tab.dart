@@ -5,13 +5,13 @@ import '../models.dart';
 import '../pair_screen.dart';
 import '../store.dart';
 import '../theme.dart';
-import '../track_list.dart';
 import '../widgets.dart';
 
 /// LibraryTab: every source + your playlists, plus unpair.
 class LibraryTab extends StatefulWidget {
   final Api api;
-  const LibraryTab({super.key, required this.api});
+  final void Function(String title, Future<List<Track>> Function() load) onOpen;
+  const LibraryTab({super.key, required this.api, required this.onOpen});
   @override
   State<LibraryTab> createState() => _LibraryTabState();
 }
@@ -37,11 +37,8 @@ class _LibraryTabState extends State<LibraryTab> {
     } catch (_) {}
   }
 
-  void _open(String title, Future<List<Track>> Function() load) {
-    Navigator.of(context).push(CupertinoPageRoute(
-        builder: (_) =>
-            TrackListScreen(title: title, api: widget.api, load: load)));
-  }
+  void _open(String title, Future<List<Track>> Function() load) =>
+      widget.onOpen(title, load);
 
   Future<void> _logout() async {
     await Store.clear();

@@ -1,4 +1,3 @@
-import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
 
 import 'api.dart';
@@ -7,27 +6,26 @@ import 'models.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// TrackListScreen loads a list of tracks (Liked, a playlist, Local, Subsonic…)
-/// and shows a gradient header with Play / Shuffle plus the rows.
-class TrackListScreen extends StatefulWidget {
+/// TrackListBody loads + shows a list of tracks (Liked, a playlist, Local,
+/// Subsonic…) with a gradient header (Play / Shuffle). It is content-only —
+/// RootShell provides the liquid-glass header + tab bar + mini-player around it.
+class TrackListBody extends StatefulWidget {
   final String title;
-  final String subtitle;
   final Api api;
   final Future<List<Track>> Function() load;
 
-  const TrackListScreen({
+  const TrackListBody({
     super.key,
     required this.title,
-    this.subtitle = '',
     required this.api,
     required this.load,
   });
 
   @override
-  State<TrackListScreen> createState() => _TrackListScreenState();
+  State<TrackListBody> createState() => _TrackListBodyState();
 }
 
-class _TrackListScreenState extends State<TrackListScreen> {
+class _TrackListBodyState extends State<TrackListBody> {
   List<Track> _tracks = const [];
   bool _loading = true;
   String? _error;
@@ -55,42 +53,38 @@ class _TrackListScreenState extends State<TrackListScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return AdaptiveScaffold(
-      appBar: AdaptiveAppBar(title: widget.title, useNativeToolbar: true),
-      body: _loading
-          ? const Center(child: CupertinoActivityIndicator())
-          : _error != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(_error!,
-                        textAlign: TextAlign.center,
-                        style:
-                            const TextStyle(color: CupertinoColors.systemRed)),
-                  ),
-                )
-              : CustomScrollView(
-                  slivers: [
-                    SliverToBoxAdapter(child: _header()),
-                    SliverList(
-                      delegate: SliverChildBuilderDelegate(
-                        (context, i) => TrackTile(
-                          track: _tracks[i],
-                          api: widget.api,
-                          onTap: () => playList(widget.api, _tracks, i),
-                        ),
-                        childCount: _tracks.length,
-                      ),
-                    ),
-                    const SliverToBoxAdapter(child: SizedBox(height: 24)),
-                  ],
-                ),
+    if (_loading) return const Center(child: CupertinoActivityIndicator());
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(_error!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: CupertinoColors.systemRed)),
+        ),
+      );
+    }
+    return CustomScrollView(
+      slivers: [
+        SliverToBoxAdapter(child: _header()),
+        SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (context, i) => TrackTile(
+              track: _tracks[i],
+              api: widget.api,
+              onTap: () => playList(widget.api, _tracks, i),
+            ),
+            childCount: _tracks.length,
+          ),
+        ),
+        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+      ],
     );
   }
 
   Widget _header() {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 4),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         gradient: kAccentGradient,
@@ -100,14 +94,14 @@ class _TrackListScreenState extends State<TrackListScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(widget.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                   color: CupertinoColors.white,
                   fontSize: 26,
                   fontWeight: FontWeight.bold)),
           Text(
-            widget.subtitle.isNotEmpty
-                ? widget.subtitle
-                : '${_tracks.length} song${_tracks.length == 1 ? '' : 's'}',
+            '${_tracks.length} song${_tracks.length == 1 ? '' : 's'}',
             style: TextStyle(color: CupertinoColors.white.withOpacity(0.85)),
           ),
           const SizedBox(height: 14),

@@ -3,13 +3,13 @@ import 'package:flutter/cupertino.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
-import '../track_list.dart';
 import '../widgets.dart';
 
 /// HomeTab: quick-access cards + your playlists (Spotify-style landing).
 class HomeTab extends StatefulWidget {
   final Api api;
-  const HomeTab({super.key, required this.api});
+  final void Function(String title, Future<List<Track>> Function() load) onOpen;
+  const HomeTab({super.key, required this.api, required this.onOpen});
   @override
   State<HomeTab> createState() => _HomeTabState();
 }
@@ -35,11 +35,8 @@ class _HomeTabState extends State<HomeTab> {
     } catch (_) {}
   }
 
-  void _open(String title, Future<List<Track>> Function() load) {
-    Navigator.of(context).push(CupertinoPageRoute(
-        builder: (_) =>
-            TrackListScreen(title: title, api: widget.api, load: load)));
-  }
+  void _open(String title, Future<List<Track>> Function() load) =>
+      widget.onOpen(title, load);
 
   @override
   Widget build(BuildContext context) {
