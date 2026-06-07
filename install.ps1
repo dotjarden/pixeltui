@@ -13,8 +13,11 @@
 #   3. Runs `pixeltui doctor --fix` to install playback deps (yt-dlp, mpv)
 #
 # Env overrides:
-#   $env:PREFIX          install location
-#   $env:PIXELTUI_NO_DEPS = "1"   skip the yt-dlp/mpv auto-install step
+#   $env:PREFIX                  install location
+#   -NoDoctor                    skip the auto doctor --fix
+#   $env:PIXELTUI_NO_DOCTOR = "1"  same, via env (back-compat: PIXELTUI_NO_DEPS)
+
+param([switch]$NoDoctor)
 
 $ErrorActionPreference = "Stop"
 $Repo = "dotjarden/pixeltui"
@@ -80,16 +83,17 @@ try {
 Ok "pixeltui installed -> $exe"
 
 # ── playback dependencies ─────────────────────────────────────────────────────────
-if ($env:PIXELTUI_NO_DEPS -ne "1") {
-    Step "Playback dependencies"
-    Info "Installing yt-dlp + mpv via 'pixeltui doctor --fix' ..."
+$skipDoctor = $NoDoctor -or ($env:PIXELTUI_NO_DOCTOR -eq "1") -or ($env:PIXELTUI_NO_DEPS -eq "1")
+if (-not $skipDoctor) {
+    Step "Checking & installing playback dependencies"
+    Info "Running 'pixeltui doctor --fix' (yt-dlp + mpv) ..."
     try { & $exe doctor --fix } catch { Warn "Some deps couldn't auto-install — run 'pixeltui doctor'." }
 }
 
 # ── done ──────────────────────────────────────────────────────────────────────────
-Write-Host "`n  Done!" -ForegroundColor Green
+Write-Host "`n  ✓ launch-ready" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Open a new terminal, then:"
-Write-Host "    pixeltui setup    configure Last.fm key, Subsonic, folders" -ForegroundColor White
+Write-Host "  Next (optional):"
+Write-Host "    pixeltui setup    add Last.fm key, Subsonic, folders" -ForegroundColor White
 Write-Host "    pixeltui          launch the player" -ForegroundColor White
 Write-Host ""
