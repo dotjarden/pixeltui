@@ -48,34 +48,49 @@ yt-dlp (those play directly).
 
 ## Install
 
-### macOS / Linux
+### macOS / Linux — one line
 
 ```sh
-git clone https://github.com/dotjarden/pixeltui
-cd pixeltui
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/dotjarden/pixeltui/main/install.sh | sh
 ```
 
-### Windows (PowerShell)
+Auto-detects your CPU, downloads the right prebuilt binary, puts `pixeltui` on
+your PATH, and installs the playback dependencies (yt-dlp, mpv). No Go needed.
+
+### Windows — one line (PowerShell)
 
 ```powershell
-git clone https://github.com/dotjarden/pixeltui
-cd pixeltui
-Set-ExecutionPolicy -Scope Process Bypass
-.\install.ps1
+irm https://raw.githubusercontent.com/dotjarden/pixeltui/main/install.ps1 | iex
+```
+
+### Manual download
+
+Grab the binary for your platform from the
+[latest release](https://github.com/dotjarden/pixeltui/releases/latest):
+
+| Platform | Asset |
+|----------|-------|
+| macOS, Apple Silicon (M1–M4) | `pixeltui-darwin-arm64` |
+| macOS, Intel | `pixeltui-darwin-amd64` |
+| Linux x86-64 | `pixeltui-linux-amd64` |
+| Linux ARM64 | `pixeltui-linux-arm64` |
+| Windows | `pixeltui-windows-amd64.exe` |
+
+These are command-line programs — run them from a terminal, not by double-clicking
+(double-clicking a binary just opens it in a text editor). On macOS:
+
+```sh
+chmod +x pixeltui-darwin-arm64
+xattr -d com.apple.quarantine pixeltui-darwin-arm64    # clear Gatekeeper
+sudo mv pixeltui-darwin-arm64 /usr/local/bin/pixeltui
+pixeltui doctor --fix
 ```
 
 ### With Go installed
 
 ```sh
 go install github.com/dotjarden/pixeltui@latest
-```
-
-Then install the playback dependencies (or run `pixeltui doctor --fix`):
-
-```sh
-make fast-ytdlp     # fast pip yt-dlp into ~/.pixeltui (≈7× faster cold starts)
-make stream-setup   # mpv (self-contained bundle on macOS, package manager on Linux)
+pixeltui doctor --fix      # install yt-dlp + mpv
 ```
 
 ---
