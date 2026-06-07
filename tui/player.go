@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/dotjarden/pixeltui/engine"
+	"github.com/dotjarden/pixeltui/lyrics"
 	"github.com/dotjarden/pixeltui/ytm"
 )
 
@@ -724,10 +725,14 @@ func cmdPoll(pb *playback, gen int) tea.Cmd {
 	}
 }
 
-// cmdLyrics fetches plain-text lyrics for a video id.
-func cmdLyrics(videoID, key string) tea.Cmd {
+// cmdLyrics fetches lyrics for a track: LRCLIB first (synced + works without a
+// YouTube id, so Subsonic/local tracks get lyrics too), then YouTube Music.
+func cmdLyrics(c engine.Candidate, key string) tea.Cmd {
 	return func() tea.Msg {
-		text, err := ytm.Lyrics(videoID)
+		if res, err := lyrics.Fetch(c.Artist, c.Track, "", c.DurationSec); err == nil && !res.Empty() {
+			return lyricsMsg{key: key, synced: res.Synced, text: res.Plain}
+		}
+		text, err := ytm.Lyrics(c.VideoID) // fallback (plain)
 		return lyricsMsg{key: key, text: text, err: err}
 	}
 }

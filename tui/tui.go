@@ -25,6 +25,7 @@ import (
 	"github.com/dotjarden/pixeltui/engine"
 	"github.com/dotjarden/pixeltui/library"
 	"github.com/dotjarden/pixeltui/local"
+	"github.com/dotjarden/pixeltui/lyrics"
 	"github.com/dotjarden/pixeltui/subsonic"
 )
 
@@ -170,9 +171,10 @@ type (
 	}
 	artMsg    []string
 	lyricsMsg struct {
-		key  string // trackKey the lyrics were fetched for
-		text string
-		err  error
+		key    string // trackKey the lyrics were fetched for
+		text   string
+		synced []lyrics.Line // timestamped lines (LRCLIB); empty → plain text
+		err    error
 	}
 	browsePlaylistsMsg []browseEntry                        // Subsonic playlists fetched for the browse menu
 	localRefreshMsg    struct{ results []engine.Candidate } // background local rescan finished
@@ -440,11 +442,12 @@ type model struct {
 	sleepAt time.Time // zero = no sleep timer; else stop playback at this time
 
 	// overlays
-	showLyrics  bool
-	lyricsVP    viewport.Model
-	lyricsBusy  bool
-	lyricsTrack string // header shown above the lyrics
-	showHelp    bool   // full shortcuts page
+	showLyrics   bool
+	lyricsVP     viewport.Model
+	lyricsBusy   bool
+	lyricsTrack  string        // header shown above the lyrics
+	lyricsSynced []lyrics.Line // timestamped lines (karaoke view); nil → plain
+	showHelp     bool          // full shortcuts page
 
 	// browse menu (unified source picker)
 	showBrowse   bool
@@ -775,7 +778,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.key != m.st.nowKey { // track changed while fetching
 			return m, nil
 		}
+		m.lyricsSynced = msg.synced
 		switch {
+		case len(msg.synced) > 0:
+			// Synced lyrics render in viewLyrics (auto-follows playback).
 		case msg.err != nil:
 			m.lyricsVP.SetContent("  Couldn't load lyrics:\n  " + firstLine(msg.err.Error()))
 		case strings.TrimSpace(msg.text) == "":
@@ -1671,17 +1677,20 @@ func (m model) toggleLyrics() (tea.Model, tea.Cmd) {
 		m.showLyrics = false
 		return m, nil
 	}
-	if m.now == nil || m.nowC.VideoID == "" {
+	// LRCLIB matches on artist/track, so any playing track qualifies (no need
+	// for a YouTube id — Subsonic/local tracks get lyrics too).
+	if m.now == nil || (m.nowC.Track == "" && m.nowC.Artist == "") {
 		m.status = "Play a track to see its lyrics"
 		m.isErr = false
 		return m, nil
 	}
 	m.showLyrics = true
 	m.lyricsBusy = true
+	m.lyricsSynced = nil
 	m.lyricsTrack = m.nowC.Track + " — " + m.nowC.Artist
 	m.lyricsVP.SetContent("")
 	m.lyricsVP.GotoTop()
-	return m, tea.Batch(cmdLyrics(m.nowC.VideoID, trackKey(m.nowC)), m.spin.Tick)
+	return m, tea.Batch(cmdLyrics(m.nowC, trackKey(m.nowC)), m.spin.Tick)
 }
 
 // replay restarts a track from the top (repeat-one).
@@ -2014,7 +2023,7 @@ func (m model) viewHelpPage() string {
 		{"/", "search · Tab switches source"},
 		{"'", "filter the current list"},
 		{"b", "browse · playlists · save queue"},
-		{"y", "lyrics"},
+		{"y", "lyrics (synced when available)"},
 		{"z", "autoplay toggle"},
 		{"t", "sleep timer"},
 		{"Tab", "switch pane"},
@@ -2081,12 +2090,67 @@ func (m model) viewLyrics() string {
 	if contentH < 4 {
 		contentH = 4
 	}
-	title := stTitle.Render("LYRICS") + "  " + stArtist.Render(truncate(m.lyricsTrack, m.width-16))
+	label := "LYRICS"
+	if len(m.lyricsSynced) > 0 {
+		label = "LYRICS ♪ synced"
+	}
+	title := stTitle.Render(label) + "  " + stArtist.Render(truncate(m.lyricsTrack, m.width-20))
 	if m.lyricsBusy {
 		title = m.spin.View() + " " + stDim.Render("loading lyrics…")
 	}
-	inner := lipgloss.JoinVertical(lipgloss.Left, title, m.lyricsVP.View())
+	body := m.lyricsVP.View()
+	if len(m.lyricsSynced) > 0 {
+		body = m.renderSyncedLyrics(m.lyricsVP.Height)
+	}
+	inner := lipgloss.JoinVertical(lipgloss.Left, title, body)
 	return stPaneFocus.Width(m.width - 2).Height(contentH - 2).Render(inner)
+}
+
+// renderSyncedLyrics draws a karaoke window: the active line (last one whose
+// timestamp has passed) is highlighted and kept centered, scrolling with
+// playback. height is the number of lines to show.
+func (m model) renderSyncedLyrics(height int) string {
+	lines := m.lyricsSynced
+	if height < 1 {
+		height = 1
+	}
+	// Active line = last timestamp <= current position.
+	active := 0
+	for i, l := range lines {
+		if l.T <= m.position+0.15 { // tiny lead so the line flips slightly early
+			active = i
+		} else {
+			break
+		}
+	}
+	// Center the active line in the window, clamped to the ends.
+	start := active - height/2
+	if start < 0 {
+		start = 0
+	}
+	if start > len(lines)-height {
+		start = len(lines) - height
+	}
+	if start < 0 {
+		start = 0
+	}
+	w := m.width - 6
+	var b strings.Builder
+	for i := start; i < start+height && i < len(lines); i++ {
+		txt := truncate(lines[i].Text, w)
+		if txt == "" {
+			txt = " "
+		}
+		switch {
+		case i == active:
+			b.WriteString(stNowTitle.Render("▌ "+txt) + "\n")
+		case i == active-1 || i == active+1:
+			b.WriteString(stText.Render("  "+txt) + "\n")
+		default:
+			b.WriteString(stDim.Render("  "+txt) + "\n")
+		}
+	}
+	return b.String()
 }
 
 func (m model) viewNowBar() string {

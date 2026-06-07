@@ -12,6 +12,8 @@ first-class support for self-hosted libraries.
   point it at your own Subsonic/Navidrome server or a folder of local files.
 - **Yours to keep** — likes, playlists, and history are stored as open, portable
   files (M3U8 / XSPF / ListenBrainz JSON) you can take anywhere.
+- **Synced lyrics** — karaoke-style, auto-scrolling lyrics via LRCLIB (free, no
+  account); works for YouTube, Subsonic, and local tracks alike.
 
 ---
 
