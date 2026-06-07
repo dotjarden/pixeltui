@@ -1351,7 +1351,8 @@ CONTROLS                          (press ? in the app for this list anytime)
     ↑ / ↓            navigate          j / k  reorder (Up Next focused)
     del              remove            s  shuffle · r  repeat · c  clear
   Modes
-    /                search the current source (YouTube / Subsonic / local)
+    /                search — the prompt shows the source; Tab switches it
+                       (YouTube · Subsonic · Local)
     '                filter the current list in place (fuzzy)
     b                browse: Liked · playlists · Local · Subsonic · save queue
                        (in browse: del = delete · p = rename a playlist)

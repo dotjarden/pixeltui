@@ -798,6 +798,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "tab":
+		// Plain search (promptMode == ""): Tab cycles the source to search.
+		if m.promptMode == "" {
+			m.searchSource = nextSource(m.searchSource, m.searchSources())
+			m.setSearchPrompt()
+			return m, nil
+		}
+		return m, nil
 	case "esc":
 		// Filter mode: Esc restores the unfiltered list.
 		if m.promptMode == "filter" {
@@ -809,6 +817,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.promptMode = ""
 		m.search.Blur()
 		m.search.Reset()
+		m.search.Prompt = "/ "
 		m.search.Placeholder = "search songs, artists…"
 		return m, nil
 	case "enter":
@@ -818,12 +827,14 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.promptMode = ""
 			m.filterBack = nil
 			m.search.Blur()
+			m.search.Prompt = "/ "
 			m.search.Placeholder = "search songs, artists…"
 			return m, nil
 		}
 		val := strings.TrimSpace(m.search.Value())
 		m.searching = false
 		m.search.Blur()
+		m.search.Prompt = "/ "
 		m.search.Placeholder = "search songs, artists…"
 
 		// Playlist-name prompts capture a name instead of running a search.
@@ -885,6 +896,11 @@ func (m *model) startPrompt(mode, placeholder, prefill string) tea.Cmd {
 	m.promptMode = mode
 	m.searching = true
 	m.search.Reset()
+	if mode == "filter" {
+		m.search.Prompt = "⌕ filter ▸ "
+	} else {
+		m.search.Prompt = "» "
+	}
 	m.search.Placeholder = placeholder
 	if prefill != "" {
 		m.search.SetValue(prefill)
@@ -930,7 +946,56 @@ func (m *model) renamePlaylist(oldName, newName string) {
 	m.status, m.isErr = fmt.Sprintf("Renamed → “%s”", newName), false
 }
 
-// searchCmd dispatches a search to the active source (set by the browse menu).
+// searchSources lists the search sources available right now, in cycle order.
+func (m model) searchSources() []string {
+	s := []string{"youtube"}
+	if m.sub != nil {
+		s = append(s, "subsonic")
+	}
+	if len(m.localDirs) > 0 {
+		s = append(s, "local")
+	}
+	return s
+}
+
+// sourceLabel is the human name for a search source ("" == YouTube).
+func sourceLabel(src string) string {
+	switch src {
+	case "subsonic":
+		return "Subsonic"
+	case "local":
+		return "Local"
+	default:
+		return "YouTube"
+	}
+}
+
+// nextSource returns the source after cur in avail (wrapping). "" == youtube.
+func nextSource(cur string, avail []string) string {
+	if cur == "" {
+		cur = "youtube"
+	}
+	for i, s := range avail {
+		if s == cur {
+			return avail[(i+1)%len(avail)]
+		}
+	}
+	return avail[0]
+}
+
+// setSearchPrompt updates the input's prompt + placeholder to show (and, when
+// more than one source exists, advertise switching) the current search source.
+func (m *model) setSearchPrompt() {
+	label := sourceLabel(m.searchSource)
+	m.search.Prompt = "⌕ " + label + " ▸ "
+	ph := "search " + label + "…"
+	if len(m.searchSources()) > 1 {
+		ph += "   ·   tab: source"
+	}
+	m.search.Placeholder = ph
+}
+
+// searchCmd dispatches a search to the active source (shown in the prompt).
 func (m model) searchCmd(query string) tea.Cmd {
 	switch m.searchSource {
 	case "subsonic":
@@ -1039,16 +1104,15 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, k.Search):
-		m.searching = true
-		m.search.Reset()
-		switch m.searchSource {
-		case "subsonic":
-			m.search.Placeholder = "search Subsonic…"
-		case "local":
-			m.search.Placeholder = "filter local files…"
-		default:
-			m.search.Placeholder = "search YouTube Music…"
+		// Plain search: prompt shows the source; Tab cycles it (handled in
+		// updateSearch). Default to the source of the page you're on.
+		if m.searchSource == "" {
+			m.searchSource = "youtube"
 		}
+		m.searching = true
+		m.promptMode = ""
+		m.search.Reset()
+		m.setSearchPrompt()
 		m.search.Focus()
 		return m, textinput.Blink
 
@@ -1947,7 +2011,7 @@ func (m model) viewHelpPage() string {
 		{"c", "clear"},
 	})
 	modes := section("VIEW & MODES", []row{
-		{"/", "search (current source)"},
+		{"/", "search · Tab switches source"},
 		{"'", "filter the current list"},
 		{"b", "browse · playlists · save queue"},
 		{"y", "lyrics"},
