@@ -14,17 +14,5 @@
 .DS_Store
 *.swp
 
-# Flutter client (generated platform projects + build output)
-clients/flutter/.dart_tool/
-clients/flutter/.flutter-plugins
-clients/flutter/.flutter-plugins-dependencies
-clients/flutter/build/
-clients/flutter/ios/
-clients/flutter/android/
-clients/flutter/macos/
-clients/flutter/linux/
-clients/flutter/windows/
-clients/flutter/web/
-clients/flutter/.idea/
-clients/flutter/pubspec.lock
-*.iml
+# Clients (Flutter companion) — local-only, in development, not tracked yet.
+/clients/
