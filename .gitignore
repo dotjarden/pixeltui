@@ -19,3 +19,6 @@
 
 # Working docs (design specs / plans) — local-only.
 /docs/superpowers/
+
+# Release metadata backup — local-only.
+/.release-backup/
