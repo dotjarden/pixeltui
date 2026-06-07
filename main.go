@@ -4,6 +4,9 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -68,6 +71,9 @@ func main() {
 			return
 		case "export":
 			cmdExport(os.Args[2:])
+			return
+		case "update", "upgrade", "self-update":
+			cmdUpdate(os.Args[2:])
 			return
 		case "build-graph":
 			cmdBuildGraph(os.Args[2:])
@@ -654,6 +660,146 @@ func cmdExport(args []string) {
 	}
 }
 
+// ── update ────────────────────────────────────────────────────────────────────
+
+const repoSlug = "dotjarden/pixeltui"
+
+// cmdUpdate replaces the running binary with the latest GitHub release build for
+// this OS/arch (same release URL the installer uses).
+func cmdUpdate(_ []string) {
+	exe, err := os.Executable()
+	if err != nil {
+		fatalf("can't locate the running binary: %v", err)
+	}
+	if p, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = p
+	}
+
+	asset := fmt.Sprintf("pixeltui-%s-%s", runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		asset = "pixeltui-windows-amd64.exe" // only an amd64 Windows build is published
+	}
+	base := "https://github.com/" + repoSlug + "/releases/latest/download/"
+
+	tag := latestTag() // best-effort, for the message
+	if tag != "" {
+		fmt.Printf("Updating pixeltui → %s …\n", tag)
+	} else {
+		fmt.Println("Updating pixeltui to the latest release …")
+	}
+
+	// Download into the same directory so the final rename is atomic.
+	dir := filepath.Dir(exe)
+	tmp, err := os.CreateTemp(dir, ".pixeltui-update-*")
+	if err != nil {
+		fatalf("can't write to %s (try sudo, or re-run the install script): %v", dir, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := download(base+asset, tmp); err != nil {
+		tmp.Close()
+		fatalf("download failed: %v", err)
+	}
+	tmp.Close()
+
+	if err := verifyChecksum(base+"SHA256SUMS", asset, tmpPath); err != nil {
+		fatalf("%v", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		fatalf("%v", err)
+	}
+	if runtime.GOOS == "darwin" {
+		exec.Command("xattr", "-d", "com.apple.quarantine", tmpPath).Run() //nolint:errcheck
+	}
+
+	// Swap into place. On Windows a running .exe can't be overwritten, so move
+	// the old one aside first (it can be deleted on next launch).
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(exe + ".old")
+		if err := os.Rename(exe, exe+".old"); err != nil {
+			fatalf("can't replace %s: %v", exe, err)
+		}
+	}
+	if err := os.Rename(tmpPath, exe); err != nil {
+		fatalf("can't install update to %s (try sudo): %v", exe, err)
+	}
+	fmt.Printf("✓ Updated → %s\n", exe)
+	if tag != "" {
+		fmt.Printf("  now on %s\n", tag)
+	}
+}
+
+// download streams url into w.
+func download(url string, w io.Writer) error {
+	resp, err := http.Get(url) //nolint:gosec
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %s", resp.Status)
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
+// verifyChecksum downloads SHA256SUMS and checks the file's hash for asset.
+// A missing/!matching sums entry is treated leniently (skip) unless it mismatches.
+func verifyChecksum(sumsURL, asset, path string) error {
+	resp, err := http.Get(sumsURL) //nolint:gosec
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil // no checksums published — skip
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var want string
+	for _, line := range strings.Split(string(body), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[1] == asset {
+			want = f[0]
+		}
+	}
+	if want == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		return fmt.Errorf("checksum mismatch — aborting update")
+	}
+	return nil
+}
+
+// latestTag fetches the latest release tag name (best-effort).
+func latestTag() string {
+	resp, err := http.Get("https://api.github.com/repos/" + repoSlug + "/releases/latest")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	var v struct {
+		TagName string `json:"tag_name"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&v) != nil {
+		return ""
+	}
+	return v.TagName
+}
+
 // ── doctor ──────────────────────────────────────────────────────────────────────
 
 // cmdDoctor checks that everything pixeltui needs is wired up correctly.
@@ -1039,6 +1185,7 @@ USAGE
   pixeltui                          open the player (search-first)
   pixeltui [track] [artist]         start seeded from a track
   pixeltui setup                    interactive config (key, Subsonic, folders)
+  pixeltui update                   self-update to the latest release
   pixeltui doctor [--fix]           check setup; --fix auto-resolves what it can
   pixeltui reset [cache|graph|library|config|all]   wipe data (keeps tools)
   pixeltui export <playlist> [file] write a playlist as XSPF (portable)
@@ -1075,7 +1222,7 @@ CONTROLS                          (press ? in the app for this list anytime)
     d / D            download to your music folder
     x / X            mute artist for this session  (X also skips)
     .                actions menu — all of the above + play-next & station
-    ⇧↵               start an endless station from the selection
+    o / O            start an endless station (from selection / playing)
   Queue    (Tab switches focus: Discover ⇄ Up Next)
     ↑ / ↓            navigate          j / k  reorder (Up Next focused)
     del              remove            s  shuffle · r  repeat · c  clear

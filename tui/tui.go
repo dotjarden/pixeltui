@@ -306,13 +306,13 @@ type keyMap struct {
 	Download, DownloadN key.Binding
 	Dislike, DislikeNow key.Binding
 	// Queue (contextual) + menus + station.
-	Remove, Clr key.Binding
-	Browse      key.Binding
-	Filter      key.Binding
-	Actions     key.Binding
-	Station     key.Binding // Shift+Enter = play selection as a station
-	Help        key.Binding
-	Quit, Esc   key.Binding
+	Remove, Clr         key.Binding
+	Browse              key.Binding
+	Filter              key.Binding
+	Actions             key.Binding
+	Station, StationNow key.Binding // o = station from selection · O = from now-playing
+	Help                key.Binding
+	Quit, Esc           key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -345,15 +345,16 @@ func newKeyMap() keyMap {
 		Dislike:    key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "mute artist")),
 		DislikeNow: key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "dislike playing")),
 
-		Remove:  key.NewBinding(key.WithKeys("delete", "backspace"), key.WithHelp("del", "remove")),
-		Clr:     key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clear")),
-		Browse:  key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "browse")),
-		Filter:  key.NewBinding(key.WithKeys("'"), key.WithHelp("'", "filter")),
-		Actions: key.NewBinding(key.WithKeys("."), key.WithHelp(".", "actions")),
-		Station: key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("⇧↵", "station")),
-		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "all keys")),
-		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-		Esc:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Remove:     key.NewBinding(key.WithKeys("delete", "backspace"), key.WithHelp("del", "remove")),
+		Clr:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clear")),
+		Browse:     key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "browse")),
+		Filter:     key.NewBinding(key.WithKeys("'"), key.WithHelp("'", "filter")),
+		Actions:    key.NewBinding(key.WithKeys("."), key.WithHelp(".", "actions")),
+		Station:    key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "station")),
+		StationNow: key.NewBinding(key.WithKeys("O"), key.WithHelp("O", "station playing")),
+		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "all keys")),
+		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Esc:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	}
 }
 
@@ -1111,6 +1112,8 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// ── station · actions menu · browse ────────────────────────────────────────
 	case key.Matches(msg, k.Station):
 		return m.stationCand(m.verbTarget(false))
+	case key.Matches(msg, k.StationNow):
+		return m.stationCand(m.verbTarget(true))
 	case key.Matches(msg, k.Actions):
 		return m.openActions()
 	case key.Matches(msg, k.Browse):
@@ -1900,7 +1903,7 @@ func (m model) viewHelpPage() string {
 		{"d / D", "download"},
 		{"x / X", "mute artist (X also skips)"},
 		{".", "actions menu (all of the above + more)"},
-		{"⇧↵", "start a station from selection"},
+		{"o / O", "start a station (selected / playing)"},
 	})
 	queue := section("QUEUE  (Up Next pane)", []row{
 		{"↑ / ↓", "navigate"},

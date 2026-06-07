@@ -95,6 +95,16 @@ go install github.com/dotjarden/pixeltui@latest
 pixeltui doctor --fix      # install yt-dlp + mpv
 ```
 
+### Updating
+
+```sh
+pixeltui update
+```
+
+Downloads the latest release build for your platform, verifies its checksum, and
+replaces the running binary in place. (You can also just re-run the install
+one-liner, or `go install …@latest`.)
+
 ---
 
 ## Quick start
@@ -166,6 +176,7 @@ Press `?` in the app for the full list at any time.
 pixeltui                          open the player (search-first)
 pixeltui [track] [artist]         start seeded from a track
 pixeltui setup                    interactive config wizard
+pixeltui update                   self-update to the latest release
 pixeltui doctor [--fix]           check setup; --fix auto-installs/repairs deps
 pixeltui reset [target]           wipe data: cache | graph | library | config | all
 pixeltui export <playlist> [file] write a playlist as XSPF (portable)
