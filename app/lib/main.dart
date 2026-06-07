@@ -1,4 +1,6 @@
+import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import 'pair_screen.dart';
@@ -8,7 +10,6 @@ import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Guard init so a platform hiccup can never leave the app on a white screen.
   try {
     await JustAudioBackground.init(
       androidNotificationChannelId: 'net.dotjarden.pixeltui.audio',
@@ -26,15 +27,26 @@ class PixeltuiApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoApp(
+    // Dark-only for a consistent music-app aesthetic. AdaptiveApp renders the
+    // native iOS 26 (liquid glass) chrome on device, Material on Android.
+    final dark = ThemeData.dark(useMaterial3: true).copyWith(
+      scaffoldBackgroundColor: kBg,
+      colorScheme:
+          ColorScheme.fromSeed(seedColor: kAccent, brightness: Brightness.dark),
+    );
+    const cupertino = CupertinoThemeData(
+      brightness: Brightness.dark,
+      primaryColor: kAccent,
+      scaffoldBackgroundColor: kBg,
+      barBackgroundColor: kBg,
+    );
+    return AdaptiveApp(
       title: 'pixeltui',
-      debugShowCheckedModeBanner: false,
-      theme: const CupertinoThemeData(
-        brightness: Brightness.dark,
-        primaryColor: kAccent,
-        scaffoldBackgroundColor: kBg,
-        barBackgroundColor: kBg,
-      ),
+      themeMode: ThemeMode.dark,
+      materialDarkTheme: dark,
+      materialLightTheme: dark,
+      cupertinoDarkTheme: cupertino,
+      cupertinoLightTheme: cupertino,
       home: paired ? const RootShell() : const PairScreen(),
     );
   }

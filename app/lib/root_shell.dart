@@ -1,5 +1,4 @@
-import 'dart:ui';
-
+import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:just_audio/just_audio.dart';
 
@@ -15,17 +14,19 @@ import 'theme.dart';
 import 'track_list.dart';
 import 'widgets.dart';
 
-/// An in-tab detail (a track list) kept in an in-app stack so the tab bar +
-/// mini-player stay visible on every page.
+/// An in-tab detail (a track list) kept in an in-app stack so the native tab
+/// bar + mini-player stay visible on every page.
 class Detail {
   final String title;
   final Future<List<Track>> Function() load;
   const Detail(this.title, this.load);
 }
 
-/// RootShell: custom Flutter "glass" chrome — a blurred header + blurred tab bar
-/// + floating mini-player, with content inset so nothing renders behind them.
-/// Per-tab in-app navigation keeps the chrome on every page.
+/// RootShell: fully native iOS 26 chrome via adaptive_platform_ui — a
+/// liquid-glass AdaptiveAppBar header + liquid-glass AdaptiveBottomNavigationBar,
+/// with a mini-player docked above the tab bar. Per-tab in-app navigation keeps
+/// the chrome on every page. Content scrolls under the translucent header
+/// (extendBodyBehindAppBar) inset by `padding`.
 class RootShell extends StatefulWidget {
   const RootShell({super.key});
   @override
@@ -35,6 +36,7 @@ class RootShell extends StatefulWidget {
 class _RootShellState extends State<RootShell> {
   int _tab = 0;
   Api? _api;
+  bool _npOpen = false;
   static const _titles = ['Home', 'Search', 'Library'];
   final List<List<Detail>> _stacks = [[], [], []];
 
@@ -67,210 +69,92 @@ class _RootShellState extends State<RootShell> {
   bool get _inDetail => _stacks[_tab].isNotEmpty;
   String get _title => _inDetail ? _stacks[_tab].last.title : _titles[_tab];
 
+  // Hide the native tab bar while the full-screen player is up (prevents the
+  // native platform view bleeding over the modal).
+  Future<void> _openNowPlaying() async {
+    setState(() => _npOpen = true);
+    await Navigator.of(context).push(CupertinoPageRoute(
+        fullscreenDialog: true, builder: (_) => const NowPlayingScreen()));
+    if (mounted) setState(() => _npOpen = false);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final mq = MediaQuery.of(context);
     final api = _api;
     if (api == null) {
-      return const CupertinoPageScaffold(
-        backgroundColor: kBg,
-        child: Center(child: CupertinoActivityIndicator()),
+      return AdaptiveScaffold(
+        appBar: AdaptiveAppBar(title: 'pixeltui', useNativeToolbar: true),
+        body: const Center(child: CupertinoActivityIndicator()),
       );
     }
+    final mq = MediaQuery.of(context);
+    // Content scrolls under the translucent native header; inset it down.
+    final pad = EdgeInsets.only(top: mq.padding.top + kHeaderHeight, bottom: 10);
 
-    // Content scrolls under the translucent header and bottom chrome.
-    final contentPadding = EdgeInsets.only(
-      top: mq.padding.top + kHeaderHeight,
-      bottom: mq.padding.bottom + kTabBarHeight + kMiniHeight,
-    );
-
-    return CupertinoPageScaffold(
-      backgroundColor: kBg,
-      child: Stack(
+    return AdaptiveScaffold(
+      extendBodyBehindAppBar: true,
+      tabBarHidden: _npOpen,
+      appBar: AdaptiveAppBar(
+        title: _title,
+        useNativeToolbar: true,
+        leading: _inDetail
+            ? GestureDetector(
+                onTap: _pop,
+                child: const Icon(CupertinoIcons.back, color: kText))
+            : null,
+      ),
+      bottomNavigationBar: AdaptiveBottomNavigationBar(
+        selectedIndex: _tab,
+        onTap: _selectTab,
+        useNativeBottomBar: true,
+        items: const [
+          AdaptiveNavigationDestination(
+              icon: 'house', selectedIcon: 'house.fill', label: 'Home'),
+          AdaptiveNavigationDestination(
+              icon: 'magnifyingglass', label: 'Search'),
+          AdaptiveNavigationDestination(
+              icon: 'music.note.list', label: 'Library'),
+        ],
+      ),
+      body: Column(
         children: [
-          Positioned.fill(
+          Expanded(
             child: IndexedStack(
               index: _tab,
               children: [
-                _tabContent(0, api, contentPadding),
-                _tabContent(1, api, contentPadding),
-                _tabContent(2, api, contentPadding),
+                _tabContent(0, api, pad),
+                _tabContent(1, api, pad),
+                _tabContent(2, api, pad),
               ],
             ),
           ),
-          // Glass header
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: _GlassHeader(
-              title: _title,
-              topInset: mq.padding.top,
-              showBack: _inDetail,
-              onBack: _pop,
-            ),
-          ),
-          // Mini-player + glass tab bar
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const MiniPlayer(),
-                _GlassTabBar(
-                  index: _tab,
-                  onTap: _selectTab,
-                  bottomInset: mq.padding.bottom,
-                ),
-              ],
-            ),
-          ),
+          MiniPlayer(onTap: _openNowPlaying),
         ],
       ),
     );
   }
 
-  Widget _tabContent(int t, Api api, EdgeInsets padding) {
+  Widget _tabContent(int t, Api api, EdgeInsets pad) {
     if (_stacks[t].isNotEmpty) {
       final d = _stacks[t].last;
       return TrackListBody(
-          api: api, title: d.title, load: d.load, padding: padding, key: ValueKey(d));
+          api: api, title: d.title, load: d.load, padding: pad, key: ValueKey(d));
     }
     switch (t) {
       case 0:
-        return HomeTab(api: api, onOpen: _open, padding: padding);
+        return HomeTab(api: api, onOpen: _open, padding: pad);
       case 1:
-        return SearchTab(api: api, padding: padding);
+        return SearchTab(api: api, padding: pad);
       default:
-        return LibraryTab(api: api, onOpen: _open, padding: padding);
+        return LibraryTab(api: api, onOpen: _open, padding: pad);
     }
   }
 }
 
-class _GlassHeader extends StatelessWidget {
-  final String title;
-  final double topInset;
-  final bool showBack;
-  final VoidCallback onBack;
-  const _GlassHeader({
-    required this.title,
-    required this.topInset,
-    required this.showBack,
-    required this.onBack,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-        child: Container(
-          padding: EdgeInsets.only(top: topInset),
-          decoration: BoxDecoration(
-            color: kBg.withOpacity(0.7),
-            border: Border(
-                bottom: BorderSide(
-                    color: CupertinoColors.white.withOpacity(0.06))),
-          ),
-          child: SizedBox(
-            height: kHeaderHeight,
-            child: Row(
-              children: [
-                if (showBack)
-                  CupertinoButton(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    onPressed: onBack,
-                    child: const Icon(CupertinoIcons.back, color: kText),
-                  )
-                else
-                  const SizedBox(width: 16),
-                Expanded(
-                  child: Text(title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          color: kText,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(width: 16),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _GlassTabBar extends StatelessWidget {
-  final int index;
-  final ValueChanged<int> onTap;
-  final double bottomInset;
-  const _GlassTabBar({
-    required this.index,
-    required this.onTap,
-    required this.bottomInset,
-  });
-
-  static const _items = [
-    (CupertinoIcons.house_fill, 'Home'),
-    (CupertinoIcons.search, 'Search'),
-    (CupertinoIcons.music_note_list, 'Library'),
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-        child: Container(
-          padding: EdgeInsets.only(bottom: bottomInset),
-          decoration: BoxDecoration(
-            color: kBg.withOpacity(0.8),
-            border: Border(
-                top: BorderSide(
-                    color: CupertinoColors.white.withOpacity(0.06))),
-          ),
-          child: SizedBox(
-            height: kTabBarHeight,
-            child: Row(
-              children: [
-                for (var i = 0; i < _items.length; i++)
-                  Expanded(
-                    child: CupertinoButton(
-                      padding: EdgeInsets.zero,
-                      onPressed: () => onTap(i),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(_items[i].$1,
-                              size: 23,
-                              color: i == index ? kAccent : kMuted),
-                          const SizedBox(height: 3),
-                          Text(_items[i].$2,
-                              style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w600,
-                                  color: i == index ? kAccent : kMuted)),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// MiniPlayer: floating now-playing capsule that sits above the tab bar.
+/// MiniPlayer: floating now-playing capsule docked above the native tab bar.
 class MiniPlayer extends StatelessWidget {
-  const MiniPlayer({super.key});
+  final VoidCallback onTap;
+  const MiniPlayer({super.key, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -281,17 +165,14 @@ class MiniPlayer extends StatelessWidget {
         final item = currentItem(snap.data);
         if (item == null) return const SizedBox.shrink();
         return GestureDetector(
-          onTap: () => Navigator.of(context).push(CupertinoPageRoute(
-              fullscreenDialog: true, builder: (_) => const NowPlayingScreen())),
+          onTap: onTap,
           child: Container(
-            height: kMiniHeight - 8,
-            margin: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+            margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: kCard2,
+              color: kCard,
               borderRadius: BorderRadius.circular(14),
-              border:
-                  Border.all(color: CupertinoColors.white.withOpacity(0.08)),
+              border: Border.all(color: CupertinoColors.white.withOpacity(0.06)),
               boxShadow: [
                 BoxShadow(
                     color: CupertinoColors.black.withOpacity(0.35),
@@ -301,7 +182,7 @@ class MiniPlayer extends StatelessWidget {
             ),
             child: Row(
               children: [
-                trackArt(item.artUri, size: 40),
+                trackArt(item.artUri, size: 44),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
