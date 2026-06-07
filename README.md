@@ -67,6 +67,10 @@ your PATH, and installs the playback dependencies (yt-dlp, mpv). No Go needed.
 irm https://raw.githubusercontent.com/dotjarden/pixeltui/main/install.ps1 | iex
 ```
 
+Skip the automatic dependency check/install with `--nodoctor`
+(`curl … | sh -s -- --nodoctor`) or `PIXELTUI_NO_DOCTOR=1`. You can always run
+`pixeltui doctor --fix` later.
+
 ### Manual download
 
 Grab the binary for your platform from the
@@ -191,8 +195,10 @@ pixeltui help                     full usage and flags
 Common flags for the recommend/seed mode: `-explore 0..10`, `-deep-cuts`,
 `-no-artist "A,B"`, `-n N`, `-offline`, `-no-tui`, `-key <lastfm>`, `-dev`.
 
-`doctor --fix` self-resolves the keystone dependencies: it installs a fast pip
-**yt-dlp** and, on macOS, a self-contained **mpv** bundle (package manager on Linux).
+`doctor --fix` self-resolves the keystone dependencies: it installs a
+self-contained **yt-dlp** binary into `~/.pixeltui/bin` (no Python needed) and
+**mpv** — a bundle on macOS, the standalone build on Windows, your package
+manager on Linux.
 
 ---
 
@@ -273,6 +279,7 @@ config.json      configuration
 cache.db         stream-URL + API cache (bbolt)
 graph.bin        offline recommendation graph
 library/         likes, playlists, history
+bin/             self-contained tools pixeltui installed (yt-dlp)
 ytdlp-venv/      fast pip yt-dlp (optional)
 mpv.app/         self-contained mpv (macOS, optional)
 ```

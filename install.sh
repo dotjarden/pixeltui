@@ -14,9 +14,10 @@
 #   3. Installs it onto your PATH as `pixeltui`
 #   4. Runs `pixeltui doctor --fix` to install playback deps (yt-dlp, mpv)
 #
-# Env overrides:
-#   PREFIX=/path        install location
-#   PIXELTUI_NO_DEPS=1  skip the yt-dlp/mpv auto-install step
+# Flags / env overrides:
+#   PREFIX=/path           install location
+#   --nodoctor             skip the auto doctor --fix (also: PIXELTUI_NO_DOCTOR=1)
+#   PIXELTUI_NO_DEPS=1     back-compat alias for --nodoctor
 
 set -e
 
@@ -123,15 +124,20 @@ case ":$PATH:" in
 esac
 
 # ── playback dependencies (yt-dlp + mpv) ─────────────────────────────────────────
-if [ "$PIXELTUI_NO_DEPS" != "1" ]; then
-  step "Playback dependencies"
-  info "Installing yt-dlp + mpv via 'pixeltui doctor --fix' ..."
+skip_doctor=0
+[ "$PIXELTUI_NO_DOCTOR" = "1" ] && skip_doctor=1
+[ "$PIXELTUI_NO_DEPS" = "1" ] && skip_doctor=1
+for a in "$@"; do [ "$a" = "--nodoctor" ] && skip_doctor=1; done
+
+if [ "$skip_doctor" != "1" ]; then
+  step "Checking & installing playback dependencies"
+  info "Running 'pixeltui doctor --fix' (yt-dlp + mpv) ..."
   "$PREFIX/pixeltui" doctor --fix || warn "Some deps couldn't auto-install — run 'pixeltui doctor' to see what's left."
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────────────
-printf "\n${GREEN}${BOLD}  Done!${RESET}\n\n"
-printf "  Next:\n"
-printf "    ${BOLD}pixeltui setup${RESET}    configure Last.fm key, Subsonic, folders\n"
+printf "\n${GREEN}${BOLD}  ✓ launch-ready${RESET}\n\n"
+printf "  Next (optional):\n"
+printf "    ${BOLD}pixeltui setup${RESET}    add Last.fm key, Subsonic, folders\n"
 printf "    ${BOLD}pixeltui${RESET}          launch the player\n\n"
 printf "  ${DIM}(open a new terminal first if 'pixeltui' isn't found)${RESET}\n\n"
