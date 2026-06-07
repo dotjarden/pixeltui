@@ -1,10 +1,10 @@
-import 'package:adaptive_platform_ui/adaptive_platform_ui.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-import '../api.dart';
-import '../store.dart';
-import 'home_screen.dart';
+import 'api.dart';
+import 'root_shell.dart';
+import 'store.dart';
+import 'theme.dart';
 
 /// PairScreen scans the QR from `pixeltui serve` (or accepts manual entry) and
 /// saves the device token.
@@ -31,7 +31,7 @@ class _PairScreenState extends State<PairScreen> {
       await Store.save(base, token);
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-          CupertinoPageRoute(builder: (_) => const HomeScreen()));
+          CupertinoPageRoute(builder: (_) => const RootShell()));
     } catch (e) {
       setState(() {
         _error = '$e';
@@ -63,18 +63,32 @@ class _PairScreenState extends State<PairScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return AdaptiveScaffold(
-      appBar: AdaptiveAppBar(title: 'Pair with pixeltui'),
-      body: SafeArea(
+    return CupertinoPageScaffold(
+      backgroundColor: kBg,
+      child: SafeArea(
         child: Column(
           children: [
-            Expanded(child: MobileScanner(onDetect: _onDetect)),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Text('Pair with pixeltui',
+                  style: TextStyle(
+                      color: kText, fontSize: 26, fontWeight: FontWeight.bold)),
+            ),
+            Expanded(
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 16),
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(borderRadius: BorderRadius.circular(16)),
+                child: MobileScanner(onDetect: _onDetect),
+              ),
+            ),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
                 children: [
                   const Text('Scan the QR shown by “pixeltui serve”',
-                      textAlign: TextAlign.center),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: kMuted)),
                   const SizedBox(height: 10),
                   if (_busy) const CupertinoActivityIndicator(),
                   if (_error != null)
@@ -85,10 +99,11 @@ class _PairScreenState extends State<PairScreen> {
                               color: CupertinoColors.systemRed)),
                     ),
                   const SizedBox(height: 8),
-                  AdaptiveButton(
+                  CupertinoButton(
+                    color: kCard2,
                     onPressed: _manual,
-                    label: 'Enter manually',
-                    style: AdaptiveButtonStyle.tinted,
+                    child: const Text('Enter manually',
+                        style: TextStyle(color: kText)),
                   ),
                 ],
               ),
@@ -107,33 +122,42 @@ class _ManualPair extends StatefulWidget {
 }
 
 class _ManualPairState extends State<_ManualPair> {
-  String _url = '';
-  String _code = '';
+  final _url = TextEditingController();
+  final _code = TextEditingController();
 
   @override
   Widget build(BuildContext context) {
-    return AdaptiveScaffold(
-      appBar: AdaptiveAppBar(title: 'Manual pairing'),
-      body: SafeArea(
+    return CupertinoPageScaffold(
+      backgroundColor: kBg,
+      navigationBar: const CupertinoNavigationBar(
+        backgroundColor: kBg,
+        border: null,
+        middle: Text('Manual pairing', style: TextStyle(color: kText)),
+      ),
+      child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
-              AdaptiveTextField(
+              CupertinoTextField(
+                controller: _url,
                 placeholder: 'Server URL (http://…:8787)',
-                onChanged: (v) => _url = v,
+                style: const TextStyle(color: kText),
               ),
               const SizedBox(height: 12),
-              AdaptiveTextField(
+              CupertinoTextField(
+                controller: _code,
                 placeholder: 'Code',
-                onChanged: (v) => _code = v,
+                style: const TextStyle(color: kText),
               ),
               const SizedBox(height: 20),
-              AdaptiveButton(
-                onPressed: () =>
-                    Navigator.of(context).pop([_url.trim(), _code.trim()]),
-                label: 'Pair',
-                style: AdaptiveButtonStyle.filled,
+              SizedBox(
+                width: double.infinity,
+                child: CupertinoButton.filled(
+                  onPressed: () => Navigator.of(context)
+                      .pop([_url.text.trim(), _code.text.trim()]),
+                  child: const Text('Pair'),
+                ),
               ),
             ],
           ),

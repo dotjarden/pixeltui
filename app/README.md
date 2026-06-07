@@ -80,12 +80,23 @@ doctor --fix` installs them); Subsonic and local need nothing extra.
 
 ```
 lib/
-  main.dart            app entry, background-audio init, routing
-  api.dart             REST client for `pixeltui serve`
-  models.dart          Track DTO (mirrors the server)
-  store.dart           secure storage of {url, token}
-  audio.dart           single AudioPlayer (just_audio + just_audio_background)
-  screens/pair_screen.dart     QR / manual pairing
-  screens/home_screen.dart     source picker, search, browse, list
-  screens/player_screen.dart   mini-player + full Now-Playing
+  main.dart          app entry, background-audio init, dark theme, routing
+  theme.dart         dark palette + accent gradient
+  api.dart           REST client for `pixeltui serve`
+  models.dart        Track DTO (mirrors the server)
+  store.dart         secure storage of {url, token}
+  audio.dart         single AudioPlayer (just_audio + just_audio_background)
+  widgets.dart       cached cover art, TrackTile, section headers
+  pair_screen.dart   QR / manual pairing
+  root_shell.dart    tab bar + persistent mini-player frame
+  now_playing.dart   full-screen player (blurred art backdrop, scrubber)
+  track_list.dart    reusable list screen (gradient header, Play/Shuffle)
+  tabs/home_tab.dart       quick-access cards + playlists
+  tabs/search_tab.dart     search field + source selector + results
+  tabs/library_tab.dart    all sources + playlists + unpair
 ```
+
+The UI is built with Cupertino widgets for a native iOS feel; `AdaptiveApp`
+(from `adaptive_platform_ui`) is the root (renders Material on Android). If
+`AdaptiveApp` ever errors, swap it for `CupertinoApp` in `main.dart` — the
+screens are Cupertino either way.

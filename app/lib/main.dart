@@ -3,11 +3,10 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
-import 'screens/home_screen.dart';
-import 'screens/pair_screen.dart';
+import 'pair_screen.dart';
+import 'root_shell.dart';
 import 'store.dart';
-
-const seed = Color(0xFF7D56F4); // pixeltui purple
+import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,19 +28,25 @@ class PixeltuiApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The app is dark-only for a consistent music-app aesthetic.
+    final dark = ThemeData.dark(useMaterial3: true).copyWith(
+      scaffoldBackgroundColor: kBg,
+      colorScheme:
+          ColorScheme.fromSeed(seedColor: kAccent, brightness: Brightness.dark),
+    );
+    const cupertino = CupertinoThemeData(
+      brightness: Brightness.dark,
+      primaryColor: kAccent,
+      scaffoldBackgroundColor: kBg,
+    );
     return AdaptiveApp(
       title: 'pixeltui',
       themeMode: ThemeMode.dark,
-      materialDarkTheme: ThemeData.dark(useMaterial3: true).copyWith(
-        colorScheme:
-            ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
-      ),
-      materialLightTheme: ThemeData.light(useMaterial3: true),
-      cupertinoDarkTheme: const CupertinoThemeData(
-          brightness: Brightness.dark, primaryColor: seed),
-      cupertinoLightTheme: const CupertinoThemeData(
-          brightness: Brightness.light, primaryColor: seed),
-      home: paired ? const HomeScreen() : const PairScreen(),
+      materialDarkTheme: dark,
+      materialLightTheme: dark,
+      cupertinoDarkTheme: cupertino,
+      cupertinoLightTheme: cupertino,
+      home: paired ? const RootShell() : const PairScreen(),
     );
   }
 }
