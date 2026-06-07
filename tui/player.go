@@ -188,13 +188,40 @@ func ipcBool(socket, prop string) bool {
 	return v
 }
 
-func (p *playback) Pause()            { if p.canControl() { ipcCmd(p.socket, "cycle", "pause") } }
-func (p *playback) Seek(s float64)    { if p.canControl() { ipcCmd(p.socket, "seek", s, "relative") } }
-func (p *playback) Volume() int       { if !p.canControl() { return -1 }; return int(ipcFloat(p.socket, "volume")) }
-func (p *playback) SetVolume(v int)   { if p.canControl() { ipcCmd(p.socket, "set_property", "volume", float64(v)) } }
-func (p *playback) IsPaused() bool    { return p.canControl() && ipcBool(p.socket, "pause") }
-func (p *playback) Position() float64 { if !p.canControl() { return 0 }; return ipcFloat(p.socket, "time-pos") }
-func (p *playback) Duration() float64 { if !p.canControl() { return 0 }; return ipcFloat(p.socket, "duration") }
+func (p *playback) Pause() {
+	if p.canControl() {
+		ipcCmd(p.socket, "cycle", "pause")
+	}
+}
+func (p *playback) Seek(s float64) {
+	if p.canControl() {
+		ipcCmd(p.socket, "seek", s, "relative")
+	}
+}
+func (p *playback) Volume() int {
+	if !p.canControl() {
+		return -1
+	}
+	return int(ipcFloat(p.socket, "volume"))
+}
+func (p *playback) SetVolume(v int) {
+	if p.canControl() {
+		ipcCmd(p.socket, "set_property", "volume", float64(v))
+	}
+}
+func (p *playback) IsPaused() bool { return p.canControl() && ipcBool(p.socket, "pause") }
+func (p *playback) Position() float64 {
+	if !p.canControl() {
+		return 0
+	}
+	return ipcFloat(p.socket, "time-pos")
+}
+func (p *playback) Duration() float64 {
+	if !p.canControl() {
+		return 0
+	}
+	return ipcFloat(p.socket, "duration")
+}
 
 // ── starting mpv ──────────────────────────────────────────────────────────────
 
@@ -288,15 +315,26 @@ func withYT(args ...string) []string {
 	return append(append([]string{}, ytExtractorArgs...), args...)
 }
 
-// findMPV resolves mpv: $PIXELTUI_MPV → ~/.pixeltui/mpv.app bundle → PATH.
-// The bundle path lets `doctor --fix` / `make stream-setup` install mpv into the
-// data dir and have the app find it without touching the system PATH.
+// findMPV resolves mpv: $PIXELTUI_MPV → data-dir install → PATH. The data-dir
+// path lets `doctor --fix` / `make stream-setup` install mpv into ~/.pixeltui and
+// have the app find it without touching the system PATH (macOS bundle, or the
+// Windows standalone build under ~/.pixeltui/mpv).
 func findMPV() string {
 	if p := os.Getenv("PIXELTUI_MPV"); p != "" {
 		return p
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		cand := filepath.Join(home, ".pixeltui", "mpv.app", "Contents", "MacOS", "mpv")
+		for _, cand := range []string{
+			filepath.Join(home, ".pixeltui", "mpv.app", "Contents", "MacOS", "mpv"), // macOS bundle
+			filepath.Join(home, ".pixeltui", "mpv", "mpv.exe"),                      // Windows build
+		} {
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+				return cand
+			}
+		}
+	}
+	if la := os.Getenv("LOCALAPPDATA"); la != "" { // winget portable shim (Windows)
+		cand := filepath.Join(la, "Microsoft", "WinGet", "Links", "mpv.exe")
 		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
 			return cand
 		}

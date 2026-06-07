@@ -994,7 +994,17 @@ func mpvBin() string {
 		return p
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		cand := filepath.Join(home, ".pixeltui", "mpv.app", "Contents", "MacOS", "mpv")
+		for _, cand := range []string{
+			filepath.Join(home, ".pixeltui", "mpv.app", "Contents", "MacOS", "mpv"),
+			filepath.Join(home, ".pixeltui", "mpv", "mpv.exe"),
+		} {
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+				return cand
+			}
+		}
+	}
+	if la := os.Getenv("LOCALAPPDATA"); la != "" { // winget portable shim
+		cand := filepath.Join(la, "Microsoft", "WinGet", "Links", "mpv.exe")
 		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
 			return cand
 		}
@@ -1090,6 +1100,27 @@ func fixMPV(dir string) bool {
 		}
 		fmt.Println("    mpv installed → ~/.pixeltui/mpv.app")
 		return true
+	case "windows":
+		// Use a native Windows package manager (no stdlib 7z, no extra deps).
+		for _, pm := range [][]string{
+			{"winget", "install", "--id", "mpv.mpv", "-e", "--silent",
+				"--accept-package-agreements", "--accept-source-agreements"},
+			{"scoop", "install", "mpv"},
+			{"choco", "install", "mpv", "-y"},
+		} {
+			if hasBin(pm[0]) {
+				fmt.Printf("    installing mpv via %s…\n", pm[0])
+				c := exec.Command(pm[0], pm[1:]...)
+				c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+				if c.Run() == nil {
+					fmt.Println("    mpv installed — restart your terminal if controls don't appear yet.")
+					return true
+				}
+			}
+		}
+		fmt.Println("    no package manager found — install mpv manually:")
+		fmt.Println("      winget install mpv.mpv   (or: scoop install mpv · choco install mpv)")
+		return false
 	default:
 		fmt.Println("    auto-install unsupported on this OS — install mpv manually")
 		return false
