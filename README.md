@@ -228,9 +228,15 @@ Run `pixeltui setup`, or edit `~/.pixeltui/config.json`:
   "local_dirs": [],
   "download_dir": "",
   "explore": 5,
-  "autoplay": true
+  "autoplay": true,
+  "charts": { "global": true, "country": "" }
 }
 ```
+
+**Current charts** (live YouTube Music top tracks — no API key needed) show in
+**Browse** and on the **For You** landing: `charts.global` (worldwide Top, on by
+default) and `charts.country` — a country name or 2-letter code, e.g.
+`"United States"` or `"GB"`.
 
 Every value can also be set by environment variable (env wins over the file):
 

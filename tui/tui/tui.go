@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -168,6 +169,11 @@ type (
 		gen    int
 		closed bool
 	}
+	discoverRecsMsg struct{ recs []engine.Candidate } // engine recs for For You
+	forYouChartMsg  struct {                          // current-chart picks for For You
+		tracks []engine.Candidate
+		label  string
+	}
 	preloadArmMsg struct{ key string } // debounced "preload the resting selection"
 	autoQueueMsg  struct{ results []engine.Candidate }
 	searchMsg     struct {
@@ -215,6 +221,12 @@ type trackItem struct{ c engine.Candidate }
 
 func (t trackItem) FilterValue() string { return t.c.Track + " " + t.c.Artist }
 
+// sectionItem is a non-selectable header row used to label groups in the
+// sectioned "For You" landing (navigation skips it).
+type sectionItem struct{ label string }
+
+func (s sectionItem) FilterValue() string { return "" }
+
 // renderState is shared (by pointer) with both delegates so row rendering can
 // reflect focus, the now-playing track, and preload status without re-creating
 // the delegate every frame.
@@ -237,6 +249,10 @@ func (d trackDelegate) Spacing() int                        { return 0 }
 func (d trackDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 
 func (d trackDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	if s, ok := item.(sectionItem); ok {
+		fmt.Fprint(w, stTitle.Render(strings.ToUpper(s.label)))
+		return
+	}
 	it, ok := item.(trackItem)
 	if !ok {
 		return
@@ -263,7 +279,17 @@ func (d trackDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 		marker = "·"
 	}
 
-	num := fmt.Sprintf("%2d", index+1)
+	// Number tracks ignoring section-header rows so the count stays sequential.
+	ord := 0
+	for i, x := range m.Items() {
+		if i >= index {
+			break
+		}
+		if _, isTrack := x.(trackItem); isTrack {
+			ord++
+		}
+	}
+	num := fmt.Sprintf("%2d", ord+1)
 
 	// Fixed column budget so rows never wrap:
 	//   lead(1) marker(1) sp num(2) sp track(W)  sp×2 artist(A) sp×2 dur(5)
@@ -278,16 +304,17 @@ func (d trackDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 		artistW = maxi(6, width-trackW-15)
 	}
 
-	track := truncate(c.Track, trackW)
-	artist := truncate(c.Artist, artistW)
+	// Each column is rendered to an exact display width so rows never misalign,
+	// even when titles contain wide or zero-width characters.
+	track := cell(c.Track, trackW)
+	artist := cell(c.Artist, artistW)
 	durStr := ""
 	if c.DurationSec > 0 {
 		durStr = fmtSec(c.DurationSec)
 	}
 
 	// One uniform plain row, identical width in every branch.
-	core := fmt.Sprintf("%s %s %-*s  %-*s  %*s",
-		marker, num, trackW, track, artistW, artist, durW, durStr)
+	core := fmt.Sprintf("%s %s %s  %s  %*s", marker, num, track, artist, durW, durStr)
 
 	switch {
 	case selected:
@@ -296,8 +323,8 @@ func (d trackDelegate) Render(w io.Writer, m list.Model, index int, item list.It
 		fmt.Fprint(w, " "+stGreen.Render(core))
 	default:
 		row := " " + stText.Render(marker) + " " + stDim.Render(num) + " " +
-			stText.Render(fmt.Sprintf("%-*s", trackW, track)) + "  " +
-			stArtist.Render(fmt.Sprintf("%-*s", artistW, artist)) + "  " +
+			stText.Render(track) + "  " +
+			stArtist.Render(artist) + "  " +
 			stDim.Render(fmt.Sprintf("%*s", durW, durStr))
 		fmt.Fprint(w, row)
 	}
@@ -407,18 +434,20 @@ func (c contextHelp) FullHelp() [][]key.Binding { return c.k.FullHelp() }
 // ── config ────────────────────────────────────────────────────────────────────
 
 type Config struct {
-	Header      string
-	SeedTags    []string
-	Results     []engine.Candidate
-	Dev         bool
-	Rec         *engine.Recommender
-	URLCache    urlCache         // disk cache for resolved stream URLs (optional)
-	Library     *library.Store   // likes/playlists/history/resume (optional)
-	Subsonic    *subsonic.Client // 2nd source: a Subsonic/Navidrome server (optional)
-	LocalDirs   []string         // 3rd source: local audio folders (optional)
-	DownloadDir string           // where downloaded tracks are saved (optional)
-	Theme       string           // accent theme name (default/ocean/matrix/amber/rose/mono)
-	DataDir     string           // ~/.pixeltui (for caches like the local index)
+	Header        string
+	SeedTags      []string
+	Results       []engine.Candidate
+	Dev           bool
+	Rec           *engine.Recommender
+	URLCache      urlCache         // disk cache for resolved stream URLs (optional)
+	Library       *library.Store   // likes/playlists/history/resume (optional)
+	Subsonic      *subsonic.Client // 2nd source: a Subsonic/Navidrome server (optional)
+	LocalDirs     []string         // 3rd source: local audio folders (optional)
+	DownloadDir   string           // where downloaded tracks are saved (optional)
+	Theme         string           // accent theme name (default/ocean/matrix/amber/rose/mono)
+	DataDir       string           // ~/.pixeltui (for caches like the local index)
+	ChartsGlobal  bool             // show the worldwide Top chart
+	ChartsCountry string           // country (name or 2-letter code) chart ("" = off)
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -505,6 +534,19 @@ type model struct {
 	staticList       bool // current view is a fixed list (Liked/playlist) → "/" only filters
 	searchFilterOnly bool // this session only filters (opened via ') — never fetches online
 
+	// "For You" discover landing (sectioned: local + engine recs + genre chart).
+	forYouSeed      engine.Candidate
+	forYouRecsTried bool
+	fyLocal         []engine.Candidate // your listening (top played + recent + liked)
+	fyRecs          []engine.Candidate // engine recommendations (async)
+	fyChart         []engine.Candidate // current-chart picks (async)
+	fyChartLabel    string             // label for the chart section ("Top Charts" / "<Country> Top")
+
+	// Charts (current global/country from YouTube Music; no API key needed).
+	charts        chartFetcher // chart source (always set)
+	chartsGlobal  bool         // show the worldwide Top chart
+	chartsCountry string       // country (name or 2-letter code) chart ("" = off)
+
 	width, height int
 }
 
@@ -574,6 +616,10 @@ func newModel(cfg Config) model {
 		localDirs:   cfg.LocalDirs,
 		downloadDir: cfg.DownloadDir,
 		dataDir:     cfg.DataDir,
+
+		charts:        ytmCharts{}, // current charts via YouTube Music (no key)
+		chartsGlobal:  cfg.ChartsGlobal,
+		chartsCountry: cfg.ChartsCountry,
 	}
 
 	// Restore the previous session's queue (Up Next) so it survives restarts.
@@ -583,11 +629,19 @@ func newModel(cfg Config) model {
 		}
 	}
 
-	// Search-first: with no seed results, open the search box immediately so
-	// `pixeltui` with no args lands the user straight in search.
+	// With no seed results, show a "For You" discover landing built from what we
+	// already have (history + likes). If there's nothing yet, fall back to
+	// search-first so `pixeltui` with no args lands straight in search.
 	if len(cfg.Results) == 0 {
-		m.searching = true
-		m.search.Focus()
+		if forYou := m.buildForYou(); len(forYou) > 0 {
+			m.fyLocal = forYou
+			m.header = "FOR YOU"
+			m.forYouSeed = forYou[0] // top track seeds engine recs (fetched async)
+			m.rebuildForYou()
+		} else {
+			m.searching = true
+			m.search.Focus()
+		}
 	}
 	return m
 }
@@ -597,9 +651,23 @@ func (m model) Init() tea.Cmd {
 	if m.searching {
 		cmds = append(cmds, textinput.Blink)
 	}
-	// Warm the first result so the very first play is fast.
-	if items := m.results.Items(); len(items) > 0 {
-		cmds = append(cmds, cmdPreload(items[0].(trackItem).c))
+	// Warm the first track so the very first play is fast (skip section headers).
+	for _, it := range m.results.Items() {
+		if ti, ok := it.(trackItem); ok {
+			cmds = append(cmds, cmdPreload(ti.c))
+			break
+		}
+	}
+	// Async: enrich the For You landing with engine recommendations (best-effort;
+	// no-op without a recommender / Last.fm key, never blocks the UI).
+	if m.header == "FOR YOU" && m.rec != nil &&
+		(m.forYouSeed.Artist != "" || m.forYouSeed.Track != "") {
+		cmds = append(cmds, cmdDiscoverRecs(m.rec, m.forYouSeed.Artist, m.forYouSeed.Track))
+	}
+	// Async: load the current chart (country if set, else global) for its For You
+	// section. Best-effort; never blocks.
+	if m.header == "FOR YOU" && (m.chartsGlobal || m.chartsCountry != "") {
+		cmds = append(cmds, cmdForYouChart(m.charts, m.chartsCountry, m.chartsGlobal))
 	}
 	return tea.Batch(cmds...)
 }
@@ -745,6 +813,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitMedia(m.now, m.gen)
 		}
 		return m, waitMedia(m.now, m.gen)
+
+	case discoverRecsMsg:
+		m.forYouRecsTried = true
+		m.fyRecs = msg.recs
+		if m.onForYou() {
+			m.rebuildForYou() // refresh the "Recommended for You" section
+		}
+		return m, nil
+
+	case forYouChartMsg:
+		m.fyChart = msg.tracks
+		m.fyChartLabel = msg.label
+		if m.onForYou() {
+			m.rebuildForYou() // refresh the current-chart section
+		}
+		return m, nil
 
 	case playErrMsg:
 		m.loading = false
@@ -978,6 +1062,183 @@ func (m *model) closeSearchInput() {
 	m.search.Reset()
 	m.search.Prompt = "/ "
 	m.search.Placeholder = "search songs, artists…"
+}
+
+// buildForYou assembles the default "Discover" landing for the left pane from
+// what we already have locally — most-played first (a personal chart), then
+// recently played, then liked highlights. Returns nil when there's nothing yet
+// (fresh install) so the caller can fall back to search-first.
+func (m model) buildForYou() []engine.Candidate {
+	if m.lib == nil {
+		return nil
+	}
+	hist, _ := m.lib.History(500) // most-recent-first
+	type agg struct {
+		c     engine.Candidate
+		plays int
+		order int // first-seen index (0 = most recent)
+	}
+	seen := map[string]*agg{}
+	order := 0
+	for _, c := range hist {
+		k := trackKey(c)
+		if k == "|" {
+			continue
+		}
+		if a, ok := seen[k]; ok {
+			a.plays++
+			continue
+		}
+		seen[k] = &agg{c: c, plays: 1, order: order}
+		order++
+	}
+
+	ranked := make([]*agg, 0, len(seen))
+	for _, a := range seen {
+		ranked = append(ranked, a)
+	}
+	// Most-played first; ties broken by recency.
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].plays != ranked[j].plays {
+			return ranked[i].plays > ranked[j].plays
+		}
+		return ranked[i].order < ranked[j].order
+	})
+
+	const maxRows = 40
+	out := make([]engine.Candidate, 0, maxRows)
+	used := map[string]bool{}
+	// push adds c if new+valid; returns whether there's still room (so callers
+	// keep going past duplicates instead of stopping on the first one).
+	push := func(c engine.Candidate) bool {
+		k := trackKey(c)
+		if k != "|" && !used[k] {
+			used[k] = true
+			out = append(out, c)
+		}
+		return len(out) < maxRows
+	}
+
+	// "On repeat": tracks played 2+ times, ranked.
+	for _, a := range ranked {
+		if a.plays < 2 {
+			break
+		}
+		if !push(a.c) {
+			return out
+		}
+	}
+	// Recently played (dedup), most recent first.
+	for _, c := range hist {
+		if !push(c) {
+			return out
+		}
+	}
+	// Round out with liked tracks if the history is thin.
+	for _, c := range m.lib.Liked() {
+		if !push(c) {
+			return out
+		}
+	}
+	return out
+}
+
+// onForYou reports whether the For You landing is the active foreground view.
+func (m model) onForYou() bool {
+	return m.header == "FOR YOU" && !m.searching &&
+		!m.showBrowse && !m.showHelp && !m.showActions && !m.showLyrics
+}
+
+// rebuildForYou rebuilds the sectioned landing from its parts (local listening,
+// engine recommendations, genre chart) into labeled, de-duplicated groups —
+// nothing is blended into one list. Sections appear only when they have content.
+func (m *model) rebuildForYou() {
+	const perSection = 10
+	seen := map[string]bool{}
+	var items []list.Item
+	add := func(label string, cs []engine.Candidate) {
+		var rows []list.Item
+		for _, c := range cs {
+			if len(rows) >= perSection {
+				break
+			}
+			k := trackKey(c)
+			if k == "|" || seen[k] {
+				continue
+			}
+			seen[k] = true
+			rows = append(rows, trackItem{c})
+		}
+		if len(rows) == 0 {
+			return
+		}
+		items = append(items, sectionItem{label})
+		items = append(items, rows...)
+	}
+	add("Your Music", m.fyLocal)
+	add("Recommended for You", m.fyRecs)
+	if len(m.fyChart) > 0 {
+		label := m.fyChartLabel
+		if label == "" {
+			label = "Top Charts"
+		}
+		add(label, m.fyChart)
+	}
+	// Preserve the highlighted track across async section updates; else pick the
+	// first real track (skipping the leading section header).
+	var keep string
+	if cur, ok := m.results.SelectedItem().(trackItem); ok {
+		keep = trackKey(cur.c)
+	}
+	m.results.SetItems(items)
+	sel := -1
+	for i, it := range items {
+		ti, ok := it.(trackItem)
+		if !ok {
+			continue
+		}
+		if sel < 0 {
+			sel = i
+		}
+		if keep != "" && trackKey(ti.c) == keep {
+			sel = i
+			break
+		}
+	}
+	if sel >= 0 {
+		m.results.Select(sel)
+	}
+}
+
+// skipResultSections nudges the Discover selection off a non-selectable section
+// header in the direction the user was moving.
+func (m *model) skipResultSections(msg tea.KeyMsg) {
+	items := m.results.Items()
+	n := len(items)
+	if n == 0 {
+		return
+	}
+	isSec := func(i int) bool { _, ok := items[i].(sectionItem); return ok }
+	if !isSec(m.results.Index()) {
+		return
+	}
+	dir := 1
+	switch msg.String() {
+	case "up", "k", "ctrl+p", "shift+tab":
+		dir = -1
+	}
+	for i := m.results.Index() + dir; i >= 0 && i < n; i += dir {
+		if !isSec(i) {
+			m.results.Select(i)
+			return
+		}
+	}
+	for i := m.results.Index() - dir; i >= 0 && i < n; i -= dir { // hit an edge → reverse
+		if !isSec(i) {
+			m.results.Select(i)
+			return
+		}
+	}
 }
 
 // currentResults extracts the candidates currently shown in the Discover list.
@@ -1473,6 +1734,7 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.queue, cmd = m.queue.Update(msg)
 	} else {
 		m.results, cmd = m.results.Update(msg)
+		m.skipResultSections(msg)
 	}
 	return m, tea.Batch(cmd, m.armPreload())
 }
@@ -1650,6 +1912,9 @@ func (m model) selectAction() (tea.Model, tea.Cmd) {
 func (m model) openBrowse() (tea.Model, tea.Cmd) {
 	var items []browseEntry
 	if m.lib != nil {
+		if len(m.buildForYou()) > 0 {
+			items = append(items, browseEntry{label: "✧  For You", kind: "foryou"})
+		}
 		items = append(items, browseEntry{label: "♥  Liked Songs", kind: "liked"})
 		if names, err := m.lib.ListPlaylists(); err == nil {
 			for _, n := range names {
@@ -1659,6 +1924,13 @@ func (m model) openBrowse() (tea.Model, tea.Cmd) {
 				items = append(items, browseEntry{label: "≡  " + n, kind: "playlist", id: n})
 			}
 		}
+	}
+	// Current charts (Last.fm global / country).
+	if m.chartsGlobal {
+		items = append(items, browseEntry{label: "🌐  Global Top", kind: "chart_global"})
+	}
+	if m.chartsCountry != "" {
+		items = append(items, browseEntry{label: "📍  " + m.chartsCountry + " Top", kind: "chart_geo", id: m.chartsCountry})
 	}
 	if len(m.localDirs) > 0 {
 		items = append(items, browseEntry{label: "♪  Local files", kind: "local"})
@@ -1752,6 +2024,33 @@ func (m model) selectBrowse() (tea.Model, tea.Cmd) {
 	}
 	m.st.focusQueue = false
 	switch e.kind {
+	case "foryou":
+		m.fyLocal = m.buildForYou()
+		m.header = "FOR YOU"
+		m.searchSource = ""
+		m.staticList = false
+		m.status = ""
+		m.rebuildForYou() // sections from local + cached recs/chart
+		cmds := []tea.Cmd{m.preloadResultsTop(3)}
+		if !m.forYouRecsTried && m.rec != nil && len(m.fyLocal) > 0 {
+			cmds = append(cmds, cmdDiscoverRecs(m.rec, m.fyLocal[0].Artist, m.fyLocal[0].Track))
+		}
+		if len(m.fyChart) == 0 && (m.chartsGlobal || m.chartsCountry != "") {
+			cmds = append(cmds, cmdForYouChart(m.charts, m.chartsCountry, m.chartsGlobal))
+		}
+		return m, tea.Batch(cmds...)
+	case "chart_global":
+		m.results.SetItems(nil)
+		m.header = "GLOBAL TOP"
+		m.searchSource, m.staticList = "", false
+		m.loading, m.status, m.isErr = true, "", false
+		return m, tea.Batch(cmdGlobalChart(m.charts), m.spin.Tick)
+	case "chart_geo":
+		m.results.SetItems(nil)
+		m.header = strings.ToUpper(e.id) + " TOP"
+		m.searchSource, m.staticList = "", false
+		m.loading, m.status, m.isErr = true, "", false
+		return m, tea.Batch(cmdGeoChart(m.charts, e.id), m.spin.Tick)
 	case "liked":
 		liked := m.lib.Liked()
 		m.results.SetItems(toItems(liked))
@@ -2724,7 +3023,40 @@ func isTerminal(f *os.File) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
+// sanitize strips characters that break fixed-width terminal layout: control
+// chars and Unicode "format" runes (zero-width spaces/joiners, BOM, bidi marks).
+// External data (YouTube chart titles especially) is full of these, and since
+// they render at zero columns but count as runes they throw column math off.
+func sanitize(s string) string {
+	clean := true
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || unicode.Is(unicode.Cf, r) {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f: // control
+		case unicode.Is(unicode.Cf, r): // zero-width / bidi / BOM
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// truncate sanitizes then trims s to a display width of max columns (adding "…"),
+// measuring by terminal cells (not rune count) so wide/zero-width chars align.
 func truncate(s string, max int) string {
+	s = sanitize(s)
 	if max <= 0 {
 		return ""
 	}
@@ -2734,11 +3066,31 @@ func truncate(s string, max int) string {
 	if max == 1 {
 		return "…"
 	}
-	r := []rune(s)
-	if len(r) > max-1 {
-		r = r[:max-1]
+	target := max - 1
+	var b strings.Builder
+	w := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if w+rw > target {
+			break
+		}
+		b.WriteRune(r)
+		w += rw
 	}
-	return string(r) + "…"
+	return b.String() + "…"
+}
+
+// cell renders s into exactly w display columns (truncating or right-padding),
+// so table columns line up regardless of the characters inside.
+func cell(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	s = truncate(s, w)
+	if pad := w - lipgloss.Width(s); pad > 0 {
+		s += strings.Repeat(" ", pad)
+	}
+	return s
 }
 
 func fmtDur(d time.Duration) string {

@@ -22,3 +22,6 @@
 
 # Release metadata backup — local-only.
 /.release-backup/
+
+# Stray legacy Flutter dir (moved to clients/flutter) — local-only.
+/app/

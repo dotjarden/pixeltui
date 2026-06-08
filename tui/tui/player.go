@@ -828,6 +828,23 @@ type recommender interface {
 	Recommend(artist, track string, n int) ([]engine.Candidate, error)
 }
 
+// cmdDiscoverRecs fetches engine recommendations to enrich the "For You" landing.
+// Best-effort and async: a nil recommender, missing Last.fm key, or any error
+// just yields no recs (the landing keeps its local content). Returns them as a
+// discoverRecsMsg rather than queuing, so the caller can blend them into Discover.
+func cmdDiscoverRecs(rec recommender, artist, track string) tea.Cmd {
+	return func() tea.Msg {
+		if rec == nil || (artist == "" && track == "") {
+			return discoverRecsMsg{}
+		}
+		results, err := rec.Recommend(artist, track, 12)
+		if err != nil {
+			return discoverRecsMsg{}
+		}
+		return discoverRecsMsg{recs: results}
+	}
+}
+
 // searchYTM runs a YouTube Music search (songs, not videos) and returns
 // candidates pre-filled with video id, duration and album art.
 func searchYTM(query string, limit int) ([]engine.Candidate, error) {

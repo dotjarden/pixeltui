@@ -16,6 +16,13 @@ type Subsonic struct {
 	Pass string `json:"pass"`
 }
 
+// Charts configures the optional global/country chart surfaces (off by default).
+// The auto genre chart (from your listening) needs no config.
+type Charts struct {
+	Global  bool   `json:"global"`  // show a worldwide Top chart
+	Country string `json:"country"` // e.g. "United States" — empty disables the country chart
+}
+
 // Config is the persisted application configuration.
 type Config struct {
 	LastfmKey   string   `json:"lastfm_key"`
@@ -25,11 +32,12 @@ type Config struct {
 	Theme       string   `json:"theme"`        // accent theme name (default if empty)
 	Explore     int      `json:"explore"`      // 0..10, default 5
 	Autoplay    bool     `json:"autoplay"`     // default true
+	Charts      Charts   `json:"charts"`       // optional global/country charts
 }
 
 // Default returns a Config with sensible defaults (Explore=5, Autoplay=true).
 func Default() *Config {
-	return &Config{Explore: 5, Autoplay: true}
+	return &Config{Explore: 5, Autoplay: true, Charts: Charts{Global: true}}
 }
 
 // Path returns the config file path for the given data directory.

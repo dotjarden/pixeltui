@@ -209,16 +209,18 @@ func cmdRecommend(args []string) {
 	// No seed given — open TUI directly in browse/search mode.
 	if trackName == "" && artistName == "" {
 		tui.Run(tui.Config{
-			Header:      "♫  pixeltui",
-			Dev:         *devFlag,
-			Rec:         rec,
-			URLCache:    cache,
-			Library:     lib,
-			Subsonic:    sub,
-			LocalDirs:   cfg.LocalDirs,
-			DownloadDir: cfg.DownloadDir,
-			Theme:       cfg.Theme,
-			DataDir:     dir,
+			Header:        "♫  pixeltui",
+			Dev:           *devFlag,
+			Rec:           rec,
+			URLCache:      cache,
+			Library:       lib,
+			Subsonic:      sub,
+			LocalDirs:     cfg.LocalDirs,
+			DownloadDir:   cfg.DownloadDir,
+			Theme:         cfg.Theme,
+			DataDir:       dir,
+			ChartsGlobal:  cfg.Charts.Global,
+			ChartsCountry: cfg.Charts.Country,
 		})
 		return
 	}
@@ -303,18 +305,20 @@ func cmdRecommend(args []string) {
 
 	// Interactive TUI (falls back to plain list if stdout is not a terminal).
 	tui.Run(tui.Config{
-		Header:      header,
-		SeedTags:    seedTags,
-		Results:     results,
-		Dev:         *devFlag,
-		Rec:         rec,
-		URLCache:    cache,
-		Library:     lib,
-		Subsonic:    sub,
-		LocalDirs:   cfg.LocalDirs,
-		DownloadDir: cfg.DownloadDir,
-		Theme:       cfg.Theme,
-		DataDir:     dir,
+		Header:        header,
+		SeedTags:      seedTags,
+		Results:       results,
+		Dev:           *devFlag,
+		Rec:           rec,
+		URLCache:      cache,
+		Library:       lib,
+		Subsonic:      sub,
+		LocalDirs:     cfg.LocalDirs,
+		DownloadDir:   cfg.DownloadDir,
+		Theme:         cfg.Theme,
+		DataDir:       dir,
+		ChartsGlobal:  cfg.Charts.Global,
+		ChartsCountry: cfg.Charts.Country,
 	})
 }
 
@@ -564,6 +568,14 @@ func cmdSetup(_ []string) {
 				Title("Download folder").
 				Description("Artist/Album layout for Navidrome (optional)").
 				Value(&cfg.DownloadDir),
+		),
+		huh.NewGroup(
+			huh.NewNote().Title("Charts").Description("Live YouTube Music Top charts (no API key needed).\n"),
+			huh.NewConfirm().Title("Show the Global Top chart?").Value(&cfg.Charts.Global),
+			huh.NewInput().
+				Title("Country chart").
+				Description("Country name or 2-letter code, e.g. United States / GB (blank = off)").
+				Value(&cfg.Charts.Country),
 		),
 	)
 
