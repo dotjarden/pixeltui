@@ -6,6 +6,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/dotjarden/pixeltui/tui/engine"
 )
 
 // tracklist is a lightweight, smooth-scrolling list for tracks + section headers.
@@ -133,11 +135,21 @@ func (l tracklist) renderRow(index int) string {
 	if s, ok := item.(sectionItem); ok {
 		return stTitle.Render(strings.ToUpper(s.label))
 	}
-	it, ok := item.(trackItem)
-	if !ok {
+
+	var c engine.Candidate
+	isAlbum := false
+	durOverride := ""
+	switch it := item.(type) {
+	case trackItem:
+		c = it.c
+	case albumItem:
+		isAlbum = true
+		c = engine.Candidate{Track: it.a.Title, Artist: it.a.Artist}
+		durOverride = it.a.Year
+	default:
 		return ""
 	}
-	c := it.c
+
 	width := l.w
 	if width < 10 {
 		width = 10
@@ -147,10 +159,12 @@ func (l tracklist) renderRow(index int) string {
 	// While the search box is active no Discover row is highlighted (the input
 	// itself is the active element); the first ↓ moves into the list.
 	selected := focused && index == l.cursor && !(l.st.hideSel && !l.isQueue)
-	isNow := l.st.nowKey != "" && trackKey(c) == l.st.nowKey
+	isNow := !isAlbum && l.st.nowKey != "" && trackKey(c) == l.st.nowKey
 
 	marker := " "
 	switch {
+	case isAlbum:
+		marker = " " // album rows: no track marker
 	case isNow && l.st.paused:
 		marker = "⏸"
 	case isNow:
@@ -161,38 +175,57 @@ func (l tracklist) renderRow(index int) string {
 		marker = "·"
 	}
 
-	// Number tracks within their section: reset at each header, skip headers.
+	// Number rows within their section: reset at each header, skip headers.
 	// (Lists without sections just number 1..N continuously.)
 	ord := 0
 	for _, x := range l.items[:index] {
 		switch x.(type) {
 		case sectionItem:
 			ord = 0
-		case trackItem:
+		case trackItem, albumItem:
 			ord++
 		}
 	}
 	num := fmt.Sprintf("%2d", ord+1)
 
 	const durW = 5
+	// Show an album column when the pane is wide enough (extra info, no crowding).
+	showAlbum := width >= 72 && c.Album != ""
 	artistW := 18
 	if width < 50 {
 		artistW = 10
 	}
-	trackW := width - artistW - (1 + 1 + 1 + 2 + 1 + 2 + 2 + durW)
+	albumW := 0
+	if showAlbum {
+		artistW = 16
+		albumW = 16
+		if width >= 110 {
+			albumW = 24
+		}
+	}
+	fixed := 1 + 1 + 1 + 2 + 1 + 2 + 2 + durW
+	if showAlbum {
+		fixed += albumW + 2
+	}
+	trackW := width - artistW - fixed
 	if trackW < 6 {
 		trackW = 6
-		artistW = maxi(6, width-trackW-15)
+		artistW = maxi(6, width-trackW-fixed+artistW)
 	}
 
 	track := cell(c.Track, trackW)
 	artist := cell(c.Artist, artistW)
-	durStr := ""
-	if c.DurationSec > 0 {
+	durStr := durOverride // album rows show the year here
+	if durStr == "" && c.DurationSec > 0 {
 		durStr = fmtSec(c.DurationSec)
 	}
+	dur := fmt.Sprintf("%*s", durW, durStr)
 
-	core := fmt.Sprintf("%s %s %s  %s  %*s", marker, num, track, artist, durW, durStr)
+	core := marker + " " + num + " " + track + "  " + artist
+	if showAlbum {
+		core += "  " + cell(c.Album, albumW)
+	}
+	core += "  " + dur
 
 	switch {
 	case selected:
@@ -200,9 +233,11 @@ func (l tracklist) renderRow(index int) string {
 	case isNow:
 		return " " + stGreen.Render(core)
 	default:
-		return " " + stText.Render(marker) + " " + stDim.Render(num) + " " +
-			stText.Render(track) + "  " +
-			stArtist.Render(artist) + "  " +
-			stDim.Render(fmt.Sprintf("%*s", durW, durStr))
+		row := " " + stText.Render(marker) + " " + stDim.Render(num) + " " +
+			stText.Render(track) + "  " + stArtist.Render(artist)
+		if showAlbum {
+			row += "  " + stDim.Render(cell(c.Album, albumW))
+		}
+		return row + "  " + stDim.Render(dur)
 	}
 }

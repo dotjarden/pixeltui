@@ -65,6 +65,7 @@ type Signal struct {
 type Candidate struct {
 	Track   string
 	Artist  string
+	Album   string // album name when known (YTM/Subsonic); blank otherwise
 	Score   float64
 	Path    string   // discovery path, shown in dev mode
 	Signals []Signal // per-signal breakdown, populated when dev mode is on

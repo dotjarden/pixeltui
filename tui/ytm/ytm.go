@@ -81,6 +81,7 @@ func fromTrack(t *ytmusic.TrackItem) engine.Candidate {
 	return engine.Candidate{
 		Track:       t.Title,
 		Artist:      joinArtists(t.Artists),
+		Album:       t.Album.Name,
 		Path:        "ytmusic",
 		VideoID:     t.VideoID,
 		DurationSec: t.Duration,

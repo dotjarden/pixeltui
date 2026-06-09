@@ -27,6 +27,7 @@ import (
 	"github.com/dotjarden/pixeltui/tui/local"
 	"github.com/dotjarden/pixeltui/tui/lyrics"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
+	"github.com/dotjarden/pixeltui/tui/ytm"
 )
 
 // repeatMode cycles: off → all (loop the queue) → one (repeat track).
@@ -178,6 +179,11 @@ type (
 	searchMsg     struct {
 		results []engine.Candidate
 		err     error
+		header  string // optional: relabel the Discover title (artist/album drills)
+	}
+	albumsMsg struct { // album entities from a "!album" search (chooser)
+		albums []ytm.Album
+		query  string
 	}
 	artMsg    []string
 	lyricsMsg struct {
@@ -225,6 +231,12 @@ func (t trackItem) FilterValue() string { return t.c.Track + " " + t.c.Artist }
 type sectionItem struct{ label string }
 
 func (s sectionItem) FilterValue() string { return "" }
+
+// albumItem is a selectable album entity row (from a "!album" search); Enter
+// drills into the album's tracks.
+type albumItem struct{ a ytm.Album }
+
+func (a albumItem) FilterValue() string { return a.a.Title + " " + a.a.Artist }
 
 // renderState is shared (by pointer) with both delegates so row rendering can
 // reflect focus, the now-playing track, and preload status without re-creating
@@ -447,6 +459,10 @@ type model struct {
 	staticList       bool // current view is a fixed list (Liked/playlist) → "/" only filters
 	searchFilterOnly bool // this session only filters (opened via ') — never fetches online
 	searchOnInput    bool // search box is the active element (no result row selected yet)
+
+	// One-level back stack (album chooser → tracks; esc restores the chooser).
+	backItems  []list.Item
+	backHeader string
 
 	// "For You" discover landing (sectioned: local + engine recs + genre chart).
 	forYouSeed      engine.Candidate
@@ -782,10 +798,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.results.Select(0)
 		m.st.focusQueue = false
 		m.staticList = false // search results are re-searchable
+		if msg.header != "" {
+			m.header = msg.header // artist/album drills relabel the Discover title
+		}
 		m.status = fmt.Sprintf("%d results", len(msg.results))
 		m.isErr = false
 		// Warm the top results so whichever of the first few they pick is instant.
 		return m, m.preloadResultsTop(3)
+
+	case albumsMsg:
+		m.loading = false
+		items := make([]list.Item, 0, len(msg.albums))
+		for _, a := range msg.albums {
+			items = append(items, albumItem{a})
+		}
+		m.results.SetItems(items)
+		m.results.Select(0)
+		m.st.focusQueue = false
+		m.staticList = true // entity list: "/" filters it
+		m.header = "ALBUMS · " + msg.query
+		if len(msg.albums) == 0 {
+			m.status, m.isErr = "no albums found", true
+		} else {
+			m.status, m.isErr = fmt.Sprintf("%d albums · ↵ open", len(msg.albums)), false
+		}
+		return m, nil
 
 	case artMsg:
 		m.art = []string(msg)
@@ -923,11 +960,25 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		online := !m.searchFilterOnly && !m.staticList &&
 			(m.searchSource == "youtube" || m.searchSource == "subsonic")
 		if m.searchOnInput && online && val != "" {
+			kind, rest := parseBang(val)
+			if rest == "" {
+				kind, rest = "track", val
+			}
 			m.closeSearchInput()
-			m.header = "SEARCH · " + val
+			m.backItems = nil // fresh top-level search clears the back stack
 			m.loading = true
 			m.status = ""
-			return m, tea.Batch(m.searchCmd(val), m.spin.Tick)
+			switch kind {
+			case "artist":
+				m.header = "ARTIST · " + rest
+				return m, tea.Batch(cmdArtistTracks(rest), m.spin.Tick)
+			case "album":
+				m.header = "ALBUMS · " + rest
+				return m, tea.Batch(cmdAlbumSearch(rest), m.spin.Tick)
+			default:
+				m.header = "SEARCH · " + rest
+				return m, tea.Batch(m.searchCmd(rest), m.spin.Tick)
+			}
 		}
 		if m.searchOnInput {
 			m.results.Select(0) // no row picked → act on the top match
@@ -1341,6 +1392,9 @@ func (m *model) setSearchPrompt() {
 	label := sourceLabel(m.searchSource)
 	m.search.Prompt = "⌕ " + label + " ▸ "
 	ph := "search " + label + "…"
+	if m.searchSource == "youtube" {
+		ph += "   ·   !a artist · !al album"
+	}
 	if len(m.searchSources()) > 1 {
 		ph += "   ·   tab: source"
 	}
@@ -1537,6 +1591,18 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, k.Quit):
 		return m, tea.Quit
+
+	case key.Matches(msg, k.Esc):
+		// Back out of an album's tracklist to the album chooser.
+		if m.backItems != nil {
+			m.results.SetItems(m.backItems)
+			m.results.Select(0)
+			m.header = m.backHeader
+			m.backItems = nil
+			m.staticList = true
+			return m, nil
+		}
+		return m, nil
 
 	case key.Matches(msg, k.Help):
 		m.showHelp = true
@@ -2093,11 +2159,18 @@ func (m model) playSelected() (tea.Model, tea.Cmd) {
 		c = it.c
 		m.removeQueueAt(m.queue.Index())
 	} else {
-		it, ok := m.results.SelectedItem().(trackItem)
-		if !ok {
+		switch it := m.results.SelectedItem().(type) {
+		case albumItem:
+			// Drill into the album's tracks; remember the chooser for esc-back.
+			m.backItems = m.results.Items()
+			m.backHeader = m.header
+			m.loading, m.status, m.isErr = true, "", false
+			return m, tea.Batch(cmdAlbumTracks(it.a), m.spin.Tick)
+		case trackItem:
+			c = it.c
+		default:
 			return m, nil
 		}
-		c = it.c
 	}
 	m.loading = true
 	m.status = ""
@@ -2638,54 +2711,80 @@ func (m model) viewHelpPage() string {
 		return lipgloss.JoinVertical(lipgloss.Left, stTitle.Render(title), t.String())
 	}
 
-	playback := section("PLAYBACK  (always now-playing)", []row{
-		{"↵", "play selected track"},
+	navigate := section("NAVIGATE", []row{
+		{"↑ ↓", "move selection"},
+		{"PgUp PgDn", "jump a page"},
+		{"g G", "top / bottom"},
+		{"Tab", "switch pane"},
+		{"↵", "play selected"},
+		{"esc", "back"},
+		{"q", "quit"},
+	})
+	playback := section("PLAYBACK", []row{
 		{"space", "pause / resume"},
-		{"←/h →/l", "seek −10s / +10s"},
+		{"← →", "seek 10s  (h l)"},
 		{"n", "next track"},
 		{"+ −", "volume up / down"},
+		{"y", "lyrics (synced)"},
+		{"o O", "station: selected / playing"},
 	})
-	verbs := section("TRACK  (lower = selected · SHIFT = playing)", []row{
-		{"f / F", "like / unlike (♥)"},
-		{"a", "add to queue   (A = play next)"},
-		{"p / P", "add to playlist"},
-		{"d / D", "download"},
-		{"x / X", "mute artist (X also skips)"},
-		{".", "actions menu (all of the above + more)"},
-		{"o / O", "start a station (selected / playing)"},
+	track := section("TRACK   (lower=selected · ⇧=playing)", []row{
+		{"f F", "like / unlike ♥"},
+		{"a A", "add to queue / play next"},
+		{"p P", "add to playlist"},
+		{"d D", "download"},
+		{"x X", "mute artist (X also skips)"},
+		{".", "actions menu (all + more)"},
 	})
-	queue := section("QUEUE  (Up Next pane)", []row{
-		{"↑ / ↓", "navigate"},
-		{"j / k", "reorder selected"},
+	search := section("SEARCH   (/ online · ' filter only)", []row{
+		{"type", "filter the list live"},
+		{"↓", "move into results"},
+		{"↵ on box", "search online"},
+		{"↵ on row", "play the result"},
+		{"!a !al", "artist / album (bangs)"},
+	})
+	queue := section("QUEUE   (Up Next · Tab)", []row{
+		{"j k", "reorder selected"},
 		{"del", "remove"},
 		{"s", "shuffle"},
-		{"r", "repeat off/all/one"},
+		{"r", "repeat off / all / one"},
 		{"c", "clear"},
+		{"z", "autoplay · t sleep timer"},
 	})
-	modes := section("VIEW & MODES", []row{
-		{"/", "find — live fuzzy filter · Tab source · ↵ search online"},
-		{"'", "filter the current list (never goes online)"},
-		{"b", "browse · playlists · save queue"},
-		{"y", "lyrics (synced when available)"},
-		{"z", "autoplay toggle"},
-		{"t", "sleep timer"},
-		{"Tab", "switch pane"},
-		{"? / esc / q", "help / back / quit"},
+	browse := section("BROWSE & MORE   (b)", []row{
+		{"b", "open browse menu"},
+		{"↵", "open entry"},
+		{"/", "filter entries"},
+		{"del", "delete playlist"},
+		{"p", "rename playlist"},
 	})
 
-	colL := lipgloss.JoinVertical(lipgloss.Left, verbs, "", queue)
-	colR := lipgloss.JoinVertical(lipgloss.Left, playback, "", modes)
 	gap := "    "
-	var inner string
-	if m.width >= 70 {
-		inner = lipgloss.JoinVertical(lipgloss.Left,
-			stTitle.Render("KEYBOARD SHORTCUTS"), "",
-			lipgloss.JoinHorizontal(lipgloss.Top, colL, gap, colR),
-		)
-	} else {
-		inner = lipgloss.JoinVertical(lipgloss.Left,
-			stTitle.Render("KEYBOARD SHORTCUTS"), "", playback, "", verbs, "", queue, "", modes)
+	notes := lipgloss.JoinVertical(lipgloss.Left,
+		stDim.Render("Browse (b):  Liked · Playlists · Charts (Global/Country) · Listening Stats · Local · Subsonic"),
+		stDim.Render("Search (/):  type to filter · ↓ into results · ↵ on the box searches online (YouTube/Subsonic)"),
+		stDim.Render("Bangs:       !a <artist> → top songs    !al <album> → pick an album, then its tracks"),
+	)
+	footer := stDim.Render("? or esc to close · q quit")
+
+	var body string
+	switch {
+	case m.width >= 112:
+		c1 := lipgloss.JoinVertical(lipgloss.Left, navigate, "", track)
+		c2 := lipgloss.JoinVertical(lipgloss.Left, playback, "", search)
+		c3 := lipgloss.JoinVertical(lipgloss.Left, queue, "", browse)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, c1, gap, c2, gap, c3)
+	case m.width >= 74:
+		c1 := lipgloss.JoinVertical(lipgloss.Left, navigate, "", track, "", browse)
+		c2 := lipgloss.JoinVertical(lipgloss.Left, playback, "", search, "", queue)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, c1, gap, c2)
+	default:
+		body = lipgloss.JoinVertical(lipgloss.Left,
+			navigate, "", playback, "", track, "", search, "", queue, "", browse)
 	}
+
+	inner := lipgloss.JoinVertical(lipgloss.Left,
+		stTitle.Render("⌨  KEYBOARD SHORTCUTS"), "", body, "", notes, "", footer)
 	return stPaneFocus.Width(m.width-2).Height(contentH-2).Padding(0, 1).Render(inner)
 }
 
@@ -2698,7 +2797,7 @@ func (m model) viewBrowse() string {
 	if m.browseSearch {
 		b.WriteString(stTitle.Render("BROWSE") + "   " + stText.Render("⌕ "+m.browseFilter) + stSelBar.Render("▏") + "\n\n")
 	} else {
-		b.WriteString(stTitle.Render("BROWSE") + "   " + stDim.Render("↵ open · / filter · d delete · p rename · esc close") + "\n\n")
+		b.WriteString(stTitle.Render("BROWSE") + "   " + stDim.Render("↵ open · / filter · del delete · p rename · esc close") + "\n\n")
 	}
 	if len(m.browseItems) == 0 {
 		b.WriteString(stDim.Render("   no matches"))
@@ -2872,7 +2971,12 @@ func (m model) viewNowBar() string {
 		if !m.hasMPV {
 			ctlHint = stYellow.Render("⚑ mpv needed for pause/seek")
 		}
-		info = lipgloss.JoinVertical(lipgloss.Left, head, "", bar, ctlHint)
+		// Album subtitle (replaces the blank spacer when we know it).
+		albumLine := ""
+		if m.nowC.Album != "" {
+			albumLine = stDim.Render("  " + truncate(m.nowC.Album, infoW-2))
+		}
+		info = lipgloss.JoinVertical(lipgloss.Left, head, albumLine, bar, ctlHint)
 	}
 
 	content := info
@@ -2968,6 +3072,69 @@ func cmdSearch(query string) tea.Cmd {
 	return func() tea.Msg {
 		results, err := searchYTM(query, 30)
 		return searchMsg{results: results, err: err}
+	}
+}
+
+// parseBang reads a leading "bang" token that scopes a search by type:
+//
+//	!a / !artist  → artists     !al / !album → albums     (none) → tracks
+//
+// It returns the kind and the remaining query.
+func parseBang(q string) (kind, rest string) {
+	q = strings.TrimSpace(q)
+	if !strings.HasPrefix(q, "!") {
+		return "track", q
+	}
+	tok := q
+	if i := strings.IndexAny(q, " \t"); i >= 0 {
+		tok, rest = q[:i], strings.TrimSpace(q[i+1:])
+	}
+	switch strings.ToLower(tok) {
+	case "!a", "!artist":
+		return "artist", rest
+	case "!al", "!album":
+		return "album", rest
+	}
+	return "track", q // unknown bang → search the whole string as tracks
+}
+
+// cmdArtistTracks resolves the top artist match and loads their top songs.
+func cmdArtistTracks(query string) tea.Cmd {
+	return func() tea.Msg {
+		arts, err := ytm.SearchArtists(query, 1)
+		if err != nil {
+			return searchMsg{err: err}
+		}
+		if len(arts) == 0 {
+			return searchMsg{err: fmt.Errorf("no artist found for %q", query)}
+		}
+		songs, err := ytm.ArtistTopSongs(arts[0].BrowseID, 40)
+		if err != nil {
+			return searchMsg{err: err}
+		}
+		return searchMsg{results: songs, header: "ARTIST · " + arts[0].Name}
+	}
+}
+
+// cmdAlbumSearch returns album entities for the chooser.
+func cmdAlbumSearch(query string) tea.Cmd {
+	return func() tea.Msg {
+		albums, err := ytm.SearchAlbums(query, 25)
+		if err != nil {
+			return searchMsg{err: err}
+		}
+		return albumsMsg{albums: albums, query: query}
+	}
+}
+
+// cmdAlbumTracks drills into one album's tracklist.
+func cmdAlbumTracks(a ytm.Album) tea.Cmd {
+	return func() tea.Msg {
+		tracks, err := ytm.AlbumTracks(a, 60)
+		if err != nil {
+			return searchMsg{err: err}
+		}
+		return searchMsg{results: tracks, header: "ALBUM · " + a.Title}
 	}
 }
 

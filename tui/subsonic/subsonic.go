@@ -244,6 +244,7 @@ func (c *Client) toCandidate(s Child) engine.Candidate {
 	cand := engine.Candidate{
 		Track:       s.Title,
 		Artist:      s.Artist,
+		Album:       s.Album,
 		DurationSec: s.Duration,
 		Source:      "subsonic",
 		StreamURL:   c.StreamURL(s.ID),
