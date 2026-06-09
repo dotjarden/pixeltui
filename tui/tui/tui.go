@@ -89,7 +89,6 @@ var (
 var (
 	cText   = ac("236", "252")
 	cDim    = ac("245", "243")
-	cFaint  = ac("250", "239")
 	cGreen  = ac("28", "84")
 	cYellow = ac("136", "221")
 	cRed    = ac("160", "203")
@@ -101,7 +100,6 @@ var (
 	stTitle     lipgloss.Style
 	stNowTitle  lipgloss.Style
 	stSelBar    lipgloss.Style
-	stHelpKey   lipgloss.Style
 	stPaneFocus lipgloss.Style
 
 	stDim     = lipgloss.NewStyle().Foreground(cDim)
@@ -129,7 +127,6 @@ func applyTheme(name string) {
 	stTitle = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
 	stNowTitle = lipgloss.NewStyle().Foreground(cAccent2).Bold(true)
 	stSelBar = lipgloss.NewStyle().Foreground(cAccent)
-	stHelpKey = lipgloss.NewStyle().Foreground(cAccent2).Bold(true)
 	stPaneFocus = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBorderA)
 }
 
@@ -178,8 +175,11 @@ type (
 		label  string
 	}
 	preloadArmMsg struct{ key string } // debounced "preload the resting selection"
-	autoQueueMsg  struct{ results []engine.Candidate }
-	searchMsg     struct {
+	autoQueueMsg  struct {
+		results []engine.Candidate
+		station bool // a user-initiated station fill (report failure, don't stay silent)
+	}
+	searchMsg struct {
 		results []engine.Candidate
 		err     error
 		header  string // optional: relabel the Discover title (artist/album drills)
@@ -883,6 +883,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.advance()
 			}
 			return m, m.preloadQueue(2)
+		}
+		if msg.station {
+			m.status, m.isErr = "Couldn't build a station from those seeds — try another playlist", true
 		}
 		return m, nil
 
@@ -2190,6 +2193,9 @@ func (m model) stationCand(c engine.Candidate, ok bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.autoQueue = true
+	if len(m.queue.Items()) > 0 {
+		m.snapshotQueue("clear") // station replaces the queue; keep it undoable
+	}
 	m.queue.SetItems(nil)
 	m.loading = true
 	m.status, m.isErr = "Station from "+truncate(c.Track, 30), false
@@ -2423,6 +2429,9 @@ func (m model) stationFromBrowse() (tea.Model, tea.Cmd) {
 	m.showBrowse = false
 	m.st.focusQueue = false
 	m.autoQueue = true
+	if len(m.queue.Items()) > 0 {
+		m.snapshotQueue("clear") // station replaces the queue; keep it undoable
+	}
 	m.queue.SetItems(nil)
 	m.aqPending = true
 	m.loading = true

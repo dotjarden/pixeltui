@@ -56,17 +56,6 @@ func SearchAlbums(query string, limit int) ([]Album, error) {
 	return out, nil
 }
 
-// AlbumTracks browses an album and returns its tracks with full playback
-// metadata (video id, duration, art). Album rows carry no per-row artist or
-// album (they're implied), so the album's artist + title are filled in.
-func AlbumTracks(a Album, limit int) ([]engine.Candidate, error) {
-	page, err := BrowseAlbum(a, limit)
-	if err != nil {
-		return nil, err
-	}
-	return page.Tracks, nil
-}
-
 // AlbumDetail is a fully-parsed album page: ordered tracks + header metadata.
 type AlbumDetail struct {
 	Album  Album // input album, with Year filled from the page when missing

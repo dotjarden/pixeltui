@@ -687,7 +687,7 @@ func afplayProxy(ytdlp, afplayPath, target string) (*playback, error) {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			http.Error(w, err.Error(), 502)
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
@@ -815,13 +815,13 @@ func cmdRadio(videoID string) tea.Cmd {
 func cmdMultiStation(rec *engine.Recommender, seeds []engine.Seed) tea.Cmd {
 	return func() tea.Msg {
 		if rec == nil || len(seeds) == 0 {
-			return autoQueueMsg{}
+			return autoQueueMsg{station: true}
 		}
 		results, err := rec.RecommendMulti(seeds, 20)
 		if err != nil {
-			return autoQueueMsg{}
+			return autoQueueMsg{station: true}
 		}
-		return autoQueueMsg{results: results}
+		return autoQueueMsg{results: results, station: true}
 	}
 }
 

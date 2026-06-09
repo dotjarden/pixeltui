@@ -39,13 +39,20 @@ func countryCode(s string) string {
 }
 
 // chartCountryList is the ordered set the in-app settings overlay cycles through
-// ("" = off). Mirrors the setup options.
+// ("" = off). ChartCountries exposes the same set (minus "off") for the setup
+// wizard so the two never drift.
 var chartCountryList = []string{
 	"", "United States", "United Kingdom", "Canada", "Australia", "Ireland",
 	"New Zealand", "Germany", "France", "Spain", "Italy", "Netherlands",
 	"Sweden", "Norway", "Denmark", "Poland", "Brazil", "Mexico", "Argentina",
 	"Japan", "South Korea", "India", "Indonesia", "Philippines", "Nigeria",
 	"South Africa",
+}
+
+// ChartCountries returns the offered country-chart names (without the "off"
+// sentinel), for the setup wizard.
+func ChartCountries() []string {
+	return chartCountryList[1:]
 }
 
 var countryNames = map[string]string{

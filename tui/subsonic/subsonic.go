@@ -205,7 +205,7 @@ func (c *Client) Playlists() ([]Playlist, error) {
 	}
 	out := make([]Playlist, 0, len(env.Resp.Playlists.Playlist))
 	for _, p := range env.Resp.Playlists.Playlist {
-		out = append(out, Playlist{ID: p.ID, Name: p.Name, SongCount: p.SongCount})
+		out = append(out, Playlist(p))
 	}
 	return out, nil
 }

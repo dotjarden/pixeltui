@@ -145,41 +145,21 @@ func findChartPlaylist(root interface{}) string {
 	return ""
 }
 
-// parseTrackRows pulls title+artist from every track row in a playlist response,
-// skipping artist/non-song rows.
+// parseTrackRows pulls full track rows (incl. video id / duration / art via
+// the shared rich parser) from a playlist response, skipping rows with no
+// artist (channel/“subscribers” rows and other non-song entries).
 func parseTrackRows(root interface{}, limit int) []engine.Candidate {
-	var out []engine.Candidate
-	seen := map[string]bool{}
-	var walk func(v interface{})
-	walk = func(v interface{}) {
-		if limit > 0 && len(out) >= limit {
-			return
+	rows := parseRichTrackRows(root, "", "", 0, false)
+	out := make([]engine.Candidate, 0, len(rows))
+	for _, c := range rows {
+		if c.Artist == "" {
+			continue
 		}
-		switch t := v.(type) {
-		case map[string]interface{}:
-			if mr, ok := t["musicResponsiveListItemRenderer"].(map[string]interface{}); ok {
-				cols, _ := mr["flexColumns"].([]interface{})
-				title := cleanTitle(cleanText(flexText(cols, 0)))
-				artist := cleanText(flexText(cols, 1))
-				if title != "" && artist != "" && !strings.Contains(strings.ToLower(artist), "subscriber") {
-					k := strings.ToLower(title + "|" + artist)
-					if !seen[k] {
-						seen[k] = true
-						out = append(out, engine.Candidate{Track: title, Artist: artist})
-					}
-				}
-				return
-			}
-			for _, c := range t {
-				walk(c)
-			}
-		case []interface{}:
-			for _, c := range t {
-				walk(c)
-			}
+		out = append(out, c)
+		if limit > 0 && len(out) >= limit {
+			break
 		}
 	}
-	walk(root)
 	return out
 }
 

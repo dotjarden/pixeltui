@@ -591,16 +591,6 @@ func cmdSetup(_ []string) {
 	}
 }
 
-// chartCountries are the country-chart options offered in setup (name → resolved
-// to a code at runtime by the TUI).
-var chartCountries = []string{
-	"United States", "United Kingdom", "Canada", "Australia", "Ireland",
-	"New Zealand", "Germany", "France", "Spain", "Italy", "Netherlands",
-	"Sweden", "Norway", "Denmark", "Poland", "Brazil", "Mexico", "Argentina",
-	"Japan", "South Korea", "India", "Indonesia", "Philippines", "Nigeria",
-	"South Africa",
-}
-
 // runSetup shows the interactive configuration form, saves it, and reports
 // connection tests. Shared by `setup` and first-run onboarding.
 func runSetup(dir string) error {
@@ -626,7 +616,7 @@ func runSetup(dir string) error {
 
 	countryOpts := []huh.Option[string]{huh.NewOption("(off)", "")}
 	inList := false
-	for _, c := range chartCountries {
+	for _, c := range tui.ChartCountries() {
 		countryOpts = append(countryOpts, huh.NewOption(c, c))
 		if strings.EqualFold(c, cfg.Charts.Country) {
 			inList = true
