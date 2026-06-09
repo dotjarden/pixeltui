@@ -351,6 +351,20 @@ make release      # cross-compile for all platforms → dist/
 make help         # all targets
 ```
 
+The build version is embedded via `-ldflags -X main.version` (`pixeltui version`);
+plain `make build` derives it from `git describe`.
+
+### Releasing (maintainers)
+
+```sh
+scripts/release.sh v0.2.0     # tags + pushes; CI does the rest
+```
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`, which cross-builds
+every platform, writes `SHA256SUMS`, and publishes the GitHub release that
+`pixeltui update` pulls from. Tags with a suffix (e.g. `v0.2.0-rc1`) publish as
+pre-releases.
+
 ---
 
 ## Troubleshooting

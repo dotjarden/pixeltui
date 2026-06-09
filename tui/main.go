@@ -33,6 +33,10 @@ import (
 	"github.com/dotjarden/pixeltui/tui/tui"
 )
 
+// version is the build version, injected at release time via
+// -ldflags "-X main.version=vX.Y.Z". "dev" for local/source builds.
+var version = "dev"
+
 // dataDir returns (and creates) ~/.pixeltui/. If the legacy ~/.musicrec exists
 // and the new dir doesn't, it's migrated in place so the pre-built artist graph,
 // cache, mpv bundle and yt-dlp venv are preserved across the rebrand.
@@ -90,6 +94,9 @@ func main() {
 			return
 		case "help", "h":
 			printUsage()
+			return
+		case "version", "v":
+			fmt.Println("pixeltui " + version)
 			return
 		}
 	}
@@ -1513,6 +1520,7 @@ USAGE
   pixeltui setup                    interactive config (key, Subsonic, folders)
   pixeltui serve [--addr --url]     run the server for the companion app (pair via QR)
   pixeltui update                   self-update to the latest release
+  pixeltui version                  print the build version
   pixeltui doctor [--fix]           check setup; --fix auto-resolves what it can
   pixeltui reset [cache|graph|library|config|all]   wipe data (keeps tools)
   pixeltui uninstall [--keep-data] [-y]             remove pixeltui + data (full clean)

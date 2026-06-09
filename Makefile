@@ -1,7 +1,11 @@
 PREFIX  ?= /usr/local/bin
 BINARY   = pixeltui
-LDFLAGS  = -ldflags="-s -w" -trimpath
 DISTDIR  = dist
+
+# Version embedded into the binary (pixeltui version). Defaults to git describe;
+# release builds pass VERSION=vX.Y.Z explicitly.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS  = -ldflags="-s -w -X main.version=$(VERSION)" -trimpath
 
 .PHONY: build install uninstall release clean \
         deps-macos deps-linux stream-setup fast-ytdlp fix-ffplay demo help
