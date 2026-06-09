@@ -458,6 +458,26 @@ func (s *Store) AddListen(c engine.Candidate, at time.Time) error {
 
 // History returns up to limit listens, most-recent first. limit <= 0 means all.
 func (s *Store) History(limit int) ([]engine.Candidate, error) {
+	listens, err := s.Listens(limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]engine.Candidate, len(listens))
+	for i, l := range listens {
+		out[i] = l.Candidate
+	}
+	return out, nil
+}
+
+// Listen is one history entry with its timestamp.
+type Listen struct {
+	Candidate engine.Candidate
+	At        time.Time
+}
+
+// Listens returns up to limit history entries with timestamps, most-recent
+// first. limit <= 0 means all.
+func (s *Store) Listens(limit int) ([]Listen, error) {
 	f, err := os.Open(s.history)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -467,7 +487,7 @@ func (s *Store) History(limit int) ([]engine.Candidate, error) {
 	}
 	defer f.Close()
 
-	var out []engine.Candidate
+	var out []Listen
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -479,7 +499,7 @@ func (s *Store) History(limit int) ([]engine.Candidate, error) {
 		if json.Unmarshal([]byte(line), &l) != nil {
 			continue // skip malformed lines rather than failing the whole read
 		}
-		out = append(out, candidateOf(l))
+		out = append(out, Listen{Candidate: candidateOf(l), At: time.Unix(l.ListenedAt, 0)})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err

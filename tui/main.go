@@ -28,6 +28,7 @@ import (
 	"github.com/dotjarden/pixeltui/tui/engine"
 	"github.com/dotjarden/pixeltui/tui/lastfm"
 	"github.com/dotjarden/pixeltui/tui/library"
+	"github.com/dotjarden/pixeltui/tui/scrobble"
 	"github.com/dotjarden/pixeltui/tui/server"
 	"github.com/dotjarden/pixeltui/tui/store"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
@@ -71,6 +72,9 @@ func main() {
 			return
 		case "setup":
 			cmdSetup(os.Args[2:])
+			return
+		case "scrobble-auth", "lastfm-auth":
+			cmdScrobbleAuth(os.Args[2:])
 			return
 		case "reset":
 			cmdReset(os.Args[2:])
@@ -182,6 +186,24 @@ func cmdRecommend(args []string) {
 	// Local library (likes/playlists/history/resume) — open best-effort.
 	lib, _ := library.Open(dir)
 
+	// Scrobbling (Last.fm / ListenBrainz) — the client is built whenever creds
+	// are configured so the in-app settings toggle works without a restart; it
+	// only submits when enabled.
+	var scrob *scrobble.Scrobbler
+	if cfg.ScrobbleReady() && !*offlineFlag {
+		var lf *scrobble.Lastfm
+		if cfg.LastfmScrobbleReady() {
+			lf = scrobble.NewLastfm(cfg.LastfmKey, cfg.Scrobble.LastfmSecret, cfg.Scrobble.LastfmSession)
+		}
+		var lb *scrobble.ListenBrainz
+		if cfg.Scrobble.ListenBrainzToken != "" {
+			lb = scrobble.NewListenBrainz(cfg.Scrobble.ListenBrainzToken)
+		}
+		if scrob = scrobble.New(lf, lb, dir); scrob != nil && cfg.Scrobble.Enabled {
+			go scrob.RetrySpool() // deliver any backlog from offline sessions
+		}
+	}
+
 	// Optional Subsonic/Navidrome source (config file or env).
 	var sub *subsonic.Client
 	if cfg.HasSubsonic() && !*offlineFlag {
@@ -240,6 +262,10 @@ func cmdRecommend(args []string) {
 			ChartsGlobal:  cfg.Charts.Global,
 			ChartsCountry: cfg.Charts.Country,
 			Explore:       cfg.Explore,
+			SeekStep:      cfg.SeekStep,
+			Scrobbler:     scrob,
+			ScrobbleOn:    cfg.Scrobble.Enabled,
+			Lastfm:        h.Live,
 		})
 		return
 	}
@@ -339,6 +365,10 @@ func cmdRecommend(args []string) {
 		ChartsGlobal:  cfg.Charts.Global,
 		ChartsCountry: cfg.Charts.Country,
 		Explore:       cfg.Explore,
+		SeekStep:      cfg.SeekStep,
+		Scrobbler:     scrob,
+		ScrobbleOn:    cfg.Scrobble.Enabled,
+		Lastfm:        h.Live,
 	})
 }
 
@@ -618,6 +648,23 @@ func runSetup(dir string) error {
 			huh.NewSelect[string]().Title("Theme").Options(huh.NewOptions(tui.ThemeNames()...)...).Value(&cfg.Theme),
 		),
 		huh.NewGroup(
+			huh.NewNote().Title("Scrobbling").
+				Description("Submit your plays to Last.fm and/or ListenBrainz (optional).\n"),
+			huh.NewConfirm().Title("Enable scrobbling?").Value(&cfg.Scrobble.Enabled),
+			huh.NewInput().
+				Title("Last.fm shared secret").
+				Description("From the same API account page as your key — needed to scrobble").
+				Placeholder("optional · 32-char secret").
+				EchoMode(huh.EchoModePassword).
+				Value(&cfg.Scrobble.LastfmSecret).
+				Validate(validateLastfmKey),
+			huh.NewInput().
+				Title("ListenBrainz token").
+				Description("listenbrainz.org/profile (optional)").
+				EchoMode(huh.EchoModePassword).
+				Value(&cfg.Scrobble.ListenBrainzToken),
+		),
+		huh.NewGroup(
 			huh.NewNote().Title("Playback").Description("How recommendations and autoplay behave.\n"),
 			huh.NewSelect[int]().
 				Title("Discovery level").
@@ -665,9 +712,83 @@ func runSetup(dir string) error {
 	}
 
 	fmt.Printf("\n  Saved → %s\n", config.Path(dir))
+
+	// Scrobbling enabled with Last.fm creds but no session yet → one-time browser
+	// authorization, right here so setup ends fully working.
+	if cfg.Scrobble.Enabled && cfg.LastfmKey != "" &&
+		cfg.Scrobble.LastfmSecret != "" && cfg.Scrobble.LastfmSession == "" {
+		if err := authorizeLastfm(dir, cfg); err != nil {
+			fmt.Printf("  Last.fm authorization skipped: %v\n", err)
+			fmt.Println("  Finish it anytime with:  pixeltui scrobble-auth")
+		}
+	}
+
 	checkConnections(cfg)
 	fmt.Println("  Next: 'pixeltui doctor' to verify mpv/yt-dlp, or just 'pixeltui' to start.")
 	return nil
+}
+
+// authorizeLastfm runs the one-time Last.fm desktop auth flow: request a token,
+// have the user approve it in the browser, then exchange it for a session key
+// (saved to config). cfg must already carry the API key + shared secret.
+func authorizeLastfm(dir string, cfg *config.Config) error {
+	lf := scrobble.NewLastfm(cfg.LastfmKey, cfg.Scrobble.LastfmSecret, "")
+	token, authURL, err := lf.GetToken()
+	if err != nil {
+		return err
+	}
+	fmt.Println("\n  Authorize pixeltui with your Last.fm account:")
+	fmt.Println("    " + authURL)
+	if openBrowser(authURL) {
+		fmt.Println("  (opened in your browser)")
+	}
+	fmt.Print("  Press Enter once you've clicked “Yes, allow access”… ")
+	bufio.NewReader(os.Stdin).ReadString('\n') //nolint:errcheck
+
+	key, user, err := lf.GetSession(token)
+	if err != nil {
+		return err
+	}
+	cfg.Scrobble.LastfmSession = key
+	cfg.Scrobble.LastfmUser = user
+	if err := cfg.Save(dir); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	fmt.Printf("  ✓ Scrobbling authorized as %s\n", user)
+	return nil
+}
+
+// openBrowser best-effort opens url in the default browser.
+func openBrowser(url string) bool {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start() == nil
+}
+
+// cmdScrobbleAuth (re)runs the Last.fm authorization flow standalone.
+func cmdScrobbleAuth(_ []string) {
+	dir, err := dataDir()
+	if err != nil {
+		fatalf("%v", err)
+	}
+	cfg, _ := config.Load(dir)
+	if cfg.LastfmKey == "" || cfg.Scrobble.LastfmSecret == "" {
+		fatalf("Last.fm API key + shared secret required first — run 'pixeltui setup'.\n" +
+			"  Both come from the same page: https://www.last.fm/api/account/create")
+	}
+	if !cfg.Scrobble.Enabled {
+		cfg.Scrobble.Enabled = true // explicit auth implies opting in
+	}
+	if err := authorizeLastfm(dir, cfg); err != nil {
+		fatalf("scrobble-auth: %v", err)
+	}
 }
 
 // validateLastfmKey accepts an empty key or a 32-char hex string.
@@ -1220,6 +1341,24 @@ func cmdDoctor(args []string) {
 		warn("Last.fm key", "unset — run 'pixeltui setup'. Free key: www.last.fm/api/account/create")
 	}
 
+	// Scrobbling (Last.fm / ListenBrainz play submission)
+	switch {
+	case !cfg.Scrobble.Enabled:
+		if cfg.ScrobbleReady() {
+			warn("scrobbling", "configured but off — enable in settings (,) or 'pixeltui setup'")
+		}
+	case cfg.LastfmScrobbleReady() && cfg.Scrobble.ListenBrainzToken != "":
+		ok("scrobbling", "Last.fm (as "+cfg.Scrobble.LastfmUser+") + ListenBrainz")
+	case cfg.LastfmScrobbleReady():
+		ok("scrobbling", "Last.fm — as "+cfg.Scrobble.LastfmUser)
+	case cfg.Scrobble.ListenBrainzToken != "":
+		ok("scrobbling", "ListenBrainz")
+	case cfg.LastfmKey != "" && cfg.Scrobble.LastfmSecret != "":
+		warn("scrobbling", "not authorized yet — run 'pixeltui scrobble-auth'")
+	default:
+		warn("scrobbling", "enabled but no service configured — run 'pixeltui setup'")
+	}
+
 	// Optional sources
 	if cfg.HasSubsonic() {
 		c := subsonic.NewClient(cfg.Subsonic.URL, cfg.Subsonic.User, cfg.Subsonic.Pass)
@@ -1650,7 +1789,8 @@ func printUsage() {
 USAGE
   pixeltui                          open the player (search-first)
   pixeltui [track] [artist]         start seeded from a track
-  pixeltui setup                    interactive config (key, Subsonic, folders)
+  pixeltui setup                    interactive config (key, scrobbling, Subsonic, folders)
+  pixeltui scrobble-auth            authorize Last.fm scrobbling (one-time)
   pixeltui serve [--addr --url]     run the server for the companion app (pair via QR)
   pixeltui update                   self-update to the latest release
   pixeltui version                  print the build version
@@ -1681,8 +1821,8 @@ CONTROLS                          (press ? in the app for this list anytime)
   Playback   (always the now-playing track)
     ↵                play selected track
     space            pause / resume   (or play, if stopped)
-    ← → / h l        seek −10s / +10s
-    n                next track
+    ← → / h l        seek (step configurable in settings)
+    n                next track        ;  jump to the playing track
     + / −            volume up / down
   Track    (lower = highlighted · SHIFT = now-playing)
     f / F            like / unlike (♥)
@@ -1690,20 +1830,35 @@ CONTROLS                          (press ? in the app for this list anytime)
     p / P            add to playlist
     d / D            download to your music folder
     x / X            mute artist for this session  (X also skips)
-    .                actions menu — all of the above + play-next & station
+    .                actions menu — all of the above + go to artist / album
     o / O            start an endless station (from selection / playing)
+  Pages
+    !a <artist>      artist page: top songs · albums · singles (+ Last.fm stats)
+    !al <album>      album pages: ordered tracklist, year, durations
+    esc              back through pages (artist → album → results)
   Queue    (Tab switches focus: Discover ⇄ Up Next)
     ↑ / ↓            navigate          j / k  reorder (Up Next focused)
     del              remove            s  shuffle · r  repeat · c  clear
+    u                undo the last clear / remove / shuffle
   Modes
     /                search — the prompt shows the source; Tab switches it
                        (YouTube · Subsonic · Local)
     '                filter the current list in place (fuzzy)
-    b                browse: Liked · playlists · Local · Subsonic · save queue
-                       (in browse: del = delete · p = rename a playlist)
-    y                lyrics            z  autoplay        t  sleep timer
+    b                browse: Liked · playlists · charts · stats · Local · Subsonic
+                       (in browse: del delete · p rename · u restore · o station
+                        from a playlist — blends up to 4 random seeds)
+    y                lyrics — [ / ] nudge sync · 0 reset
+    z  autoplay      t  sleep timer    ,  settings
     Tab              switch pane       ?  all keys
     q                quit              esc  back / close
+
+SCROBBLING  (Last.fm + ListenBrainz — optional)
+  pixeltui setup     enter your Last.fm API key + shared secret (same page) and/or
+                     a ListenBrainz token, then authorize in the browser once.
+  pixeltui scrobble-auth   redo the Last.fm authorization anytime
+  Plays submit at 50% / 4 min (the standard rule); offline plays are spooled in
+  ~/.pixeltui/library/scrobble-spool.jsonl and retried on the next launch.
+  Toggle live in settings (,).
 
 PLAYBACK SETUP                    (or just run:  pixeltui doctor)
   yt-dlp   required — resolves the audio stream. Single binary:

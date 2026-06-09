@@ -810,6 +810,21 @@ func cmdRadio(videoID string) tea.Cmd {
 	}
 }
 
+// cmdMultiStation blends recommendations from several seed tracks (a playlist
+// station). Results arrive as a normal auto-queue fill.
+func cmdMultiStation(rec *engine.Recommender, seeds []engine.Seed) tea.Cmd {
+	return func() tea.Msg {
+		if rec == nil || len(seeds) == 0 {
+			return autoQueueMsg{}
+		}
+		results, err := rec.RecommendMulti(seeds, 20)
+		if err != nil {
+			return autoQueueMsg{}
+		}
+		return autoQueueMsg{results: results}
+	}
+}
+
 // cmdRecommend fetches local-engine recommendations for auto-queue.
 func cmdRecommend(rec recommender, artist, track string) tea.Cmd {
 	return func() tea.Msg {

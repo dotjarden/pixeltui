@@ -79,6 +79,106 @@ func (r *Recommender) Recommend(artist, track string, n int) ([]Candidate, error
 	return selectTop(candidates, n, artist), nil
 }
 
+// Seed identifies one seed track for multi-seed recommendations.
+type Seed struct {
+	Artist string
+	Track  string
+}
+
+// maxSeeds caps the per-station seed count: each seed costs ~13 Last.fm calls,
+// and beyond 4 the blend stops adding meaningful variety.
+const maxSeeds = 4
+
+// RecommendMulti blends recommendations from several seeds (a playlist, your
+// liked tracks, …) into one ranked list. Seeds are fetched concurrently;
+// tracks surfaced by more than one seed get a confidence boost — that overlap
+// is the strongest signal a track fits the blend. Per-artist results are
+// capped at 2 for breadth. Partial seed failures are tolerated.
+func (r *Recommender) RecommendMulti(seeds []Seed, n int) ([]Candidate, error) {
+	if len(seeds) == 0 {
+		return nil, fmt.Errorf("no seeds")
+	}
+	if len(seeds) > maxSeeds {
+		seeds = seeds[:maxSeeds]
+	}
+
+	// The seeds themselves never come back as recommendations.
+	seedKeys := make(map[string]bool, len(seeds))
+	for _, s := range seeds {
+		seedKeys[trackKey(s.Artist, s.Track)] = true
+	}
+
+	per := n
+	if per < 10 {
+		per = 10
+	}
+	type result struct {
+		cs  []Candidate
+		err error
+	}
+	ch := make(chan result, len(seeds))
+	for _, s := range seeds {
+		go func(s Seed) {
+			cs, err := r.Recommend(s.Artist, s.Track, per)
+			ch <- result{cs, err}
+		}(s)
+	}
+
+	byKey := map[string]*Candidate{}
+	var order []string // first-seen order keeps merging deterministic
+	var lastErr error
+	for range seeds {
+		res := <-ch
+		if res.err != nil {
+			lastErr = res.err
+			continue
+		}
+		for i := range res.cs {
+			c := res.cs[i]
+			k := trackKey(c.Artist, c.Track)
+			if seedKeys[k] {
+				continue
+			}
+			if ex, ok := byKey[k]; ok {
+				// Recommended off multiple seeds → boost, keep the higher score's path.
+				ex.Score += 0.25 + 0.25*c.Score
+				continue
+			}
+			cc := c
+			byKey[k] = &cc
+			order = append(order, k)
+		}
+	}
+	if len(order) == 0 {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no recommendations for these seeds")
+	}
+
+	merged := make([]Candidate, 0, len(order))
+	for _, k := range order {
+		merged = append(merged, *byKey[k])
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Score > merged[j].Score })
+
+	const perArtistCap = 2
+	count := map[string]int{}
+	out := make([]Candidate, 0, n)
+	for _, c := range merged {
+		lc := strings.ToLower(c.Artist)
+		if count[lc] >= perArtistCap {
+			continue
+		}
+		count[lc]++
+		out = append(out, c)
+		if len(out) >= n {
+			break
+		}
+	}
+	return out, nil
+}
+
 // seedData holds the raw Last.fm responses gathered during phase 1.
 type seedData struct {
 	similarTracks  []lastfm.SimilarTrack

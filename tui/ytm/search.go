@@ -56,40 +56,72 @@ func SearchAlbums(query string, limit int) ([]Album, error) {
 	return out, nil
 }
 
-// ArtistTopSongs browses an artist page and returns its top songs.
-func ArtistTopSongs(browseID string, limit int) ([]engine.Candidate, error) {
-	root, err := browse(map[string]interface{}{"browseId": browseID, "context": innerContext("US")})
+// AlbumTracks browses an album and returns its tracks with full playback
+// metadata (video id, duration, art). Album rows carry no per-row artist or
+// album (they're implied), so the album's artist + title are filled in.
+func AlbumTracks(a Album, limit int) ([]engine.Candidate, error) {
+	page, err := BrowseAlbum(a, limit)
 	if err != nil {
 		return nil, err
 	}
-	out := parseTrackRows(root, limit)
-	if len(out) == 0 {
-		return nil, fmt.Errorf("artist: no songs found")
-	}
-	return out, nil
+	return page.Tracks, nil
 }
 
-// AlbumTracks browses an album and returns its tracks. Album rows carry no
-// per-row artist (it's implied), so the album's artist + title are filled in.
-func AlbumTracks(a Album, limit int) ([]engine.Candidate, error) {
+// AlbumDetail is a fully-parsed album page: ordered tracks + header metadata.
+type AlbumDetail struct {
+	Album  Album // input album, with Year filled from the page when missing
+	Tracks []engine.Candidate
+	ArtURL string // album cover (largest header thumbnail)
+}
+
+// BrowseAlbum fetches an album page by browse id and parses its tracklist and
+// header metadata.
+func BrowseAlbum(a Album, limit int) (*AlbumDetail, error) {
 	root, err := browse(map[string]interface{}{"browseId": a.BrowseID, "context": innerContext("US")})
 	if err != nil {
 		return nil, err
 	}
-	var out []engine.Candidate
+	out := parseRichTrackRows(root, a.Artist, a.Title, limit, false)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("album: no tracks found")
+	}
+	d := &AlbumDetail{Album: a, Tracks: out}
+	// Header metadata: year (when search didn't carry one) and cover art. New
+	// album layouts nest the header inside contents, so find it wherever it is.
+	if d.Album.Year == "" {
+		if h := findHeader(root); h != nil {
+			d.Album.Year = yearFromRuns(dig(h, "subtitle", "runs"))
+		}
+	}
+	d.ArtURL = thumbsBest(dig(root, "background", "musicThumbnailRenderer", "thumbnail", "thumbnails"))
+	if d.ArtURL == "" {
+		d.ArtURL = thumbsBest(dig(root, "microformat", "microformatDataRenderer", "thumbnail", "thumbnails"))
+	}
+	// Tracks inherit the album cover when their rows carry none.
+	for i := range d.Tracks {
+		if d.Tracks[i].ArtURL == "" {
+			d.Tracks[i].ArtURL = d.ArtURL
+		}
+	}
+	return d, nil
+}
+
+// findHeader locates the album/playlist detail header renderer anywhere in the
+// response (its nesting differs between YTM layout generations).
+func findHeader(root interface{}) map[string]interface{} {
+	var found map[string]interface{}
 	var walk func(v interface{})
 	walk = func(v interface{}) {
-		if limit > 0 && len(out) >= limit {
+		if found != nil {
 			return
 		}
 		switch t := v.(type) {
 		case map[string]interface{}:
-			if mr, ok := t["musicResponsiveListItemRenderer"].(map[string]interface{}); ok {
-				cols, _ := mr["flexColumns"].([]interface{})
-				if title := cleanTitle(cleanText(flexText(cols, 0))); title != "" {
-					out = append(out, engine.Candidate{Track: title, Artist: a.Artist, Album: a.Title})
+			for _, k := range []string{"musicResponsiveHeaderRenderer", "musicDetailHeaderRenderer"} {
+				if h, ok := t[k].(map[string]interface{}); ok {
+					found = h
+					return
 				}
-				return
 			}
 			for _, c := range t {
 				walk(c)
@@ -101,8 +133,5 @@ func AlbumTracks(a Album, limit int) ([]engine.Candidate, error) {
 		}
 	}
 	walk(root)
-	if len(out) == 0 {
-		return nil, fmt.Errorf("album: no tracks found")
-	}
-	return out, nil
+	return found
 }

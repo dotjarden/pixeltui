@@ -215,6 +215,65 @@ func (c *Client) GetSimilarArtists(artist string, limit int) ([]SimilarArtist, e
 	return resp.SimilarArtists.Artist, nil
 }
 
+// ArtistInfo is the headline metadata from artist.getInfo.
+type ArtistInfo struct {
+	Name      string
+	Listeners int
+	Playcount int
+	Tags      []string
+	Summary   string // first bio paragraph, plain text
+}
+
+// GetArtistInfo returns listeners/playcount/tags/bio for an artist.
+func (c *Client) GetArtistInfo(artist string) (*ArtistInfo, error) {
+	body, err := c.get(url.Values{
+		"method": {"artist.getInfo"},
+		"artist": {artist},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Artist struct {
+			Name  string `json:"name"`
+			Stats struct {
+				Listeners FlexInt `json:"listeners"`
+				Playcount FlexInt `json:"playcount"`
+			} `json:"stats"`
+			Tags struct {
+				Tag []Tag `json:"tag"`
+			} `json:"tags"`
+			Bio struct {
+				Summary string `json:"summary"`
+			} `json:"bio"`
+		} `json:"artist"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	info := &ArtistInfo{
+		Name:      resp.Artist.Name,
+		Listeners: int(resp.Artist.Stats.Listeners),
+		Playcount: int(resp.Artist.Stats.Playcount),
+		Summary:   stripBioLink(resp.Artist.Bio.Summary),
+	}
+	for _, t := range resp.Artist.Tags.Tag {
+		if t.Name != "" {
+			info.Tags = append(info.Tags, t.Name)
+		}
+	}
+	return info, nil
+}
+
+// stripBioLink removes the trailing "<a href…>Read more…</a>" Last.fm appends
+// to bio summaries, leaving plain text.
+func stripBioLink(s string) string {
+	if i := strings.Index(s, "<a href"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
+}
+
 // GetArtistTopTracks returns an artist's most-played tracks.
 // The response includes per-track listener counts, which we use for popularity scoring.
 func (c *Client) GetArtistTopTracks(artist string, limit int) ([]TopTrack, error) {

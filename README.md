@@ -14,6 +14,10 @@ first-class support for self-hosted libraries.
   files (M3U8 / XSPF / ListenBrainz JSON) you can take anywhere.
 - **Synced lyrics** — karaoke-style, auto-scrolling lyrics via LRCLIB (free, no
   account); works for YouTube, Subsonic, and local tracks alike.
+- **Artist & album pages** — drill into any artist (top songs · albums · singles,
+  with Last.fm listener stats) or album (ordered tracklist, year), like the big apps.
+- **Scrobbling** — submit plays to Last.fm and/or ListenBrainz, with an offline
+  spool so listens made without a connection aren't lost.
 
 ---
 
@@ -23,6 +27,7 @@ first-class support for self-hosted libraries.
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Controls](#controls)
+- [Scrobbling](#scrobbling)
 - [Commands](#commands)
 - [Configuration](#configuration)
 - [Sources](#sources)
@@ -154,8 +159,8 @@ One rule keeps the keymap predictable for track actions:
 |-----|--------|
 | `↵` | play selected track |
 | `space` | pause / resume |
-| `← →` (or `h l`) | seek −10s / +10s |
-| `n` | next track |
+| `← →` (or `h l`) | seek (step configurable in settings, default 10s) |
+| `n` | next track · `;` jump to the playing track |
 | `+` / `−` | volume up / down |
 
 **Track** — lowercase = highlighted, **Shift** = now-playing
@@ -167,8 +172,18 @@ One rule keeps the keymap predictable for track actions:
 | `p` / `P` | add to playlist |
 | `d` / `D` | download |
 | `x` / `X` | mute artist for this session (`X` also skips) |
-| `.` | **actions menu** — everything above, plus play-next & start station |
+| `.` | **actions menu** — everything above, plus **go to artist / album** & start station |
 | `⇧↵` | start an endless station from the selection |
+
+**Artist & album pages**
+
+| Key | Action |
+|-----|--------|
+| `/` then `!a <artist>` | artist page: top songs · albums · singles (+ Last.fm listener stats) |
+| `/` then `!al <album>` | album search → full album page (ordered tracklist, year, durations) |
+| `↵` on an album row | open the album |
+| `esc` | back through pages (album → artist → results) |
+| `e` | queue everything on the page |
 
 **Queue** (Up Next pane — `Tab` switches focus)
 
@@ -176,17 +191,35 @@ One rule keeps the keymap predictable for track actions:
 |-----|--------|
 | `↑ ↓` | navigate · `j` `k` reorder |
 | `del` | remove · `s` shuffle · `r` repeat · `c` clear |
+| `u` | undo the last clear / remove / shuffle |
 
 **View & modes**
 
 | Key | Action |
 |-----|--------|
 | `/` | search the current source |
-| `b` | browse: Liked · playlists · Local · Subsonic · save queue |
-| `y` | lyrics · `z` autoplay · `t` sleep timer |
+| `b` | browse: Liked · playlists · charts · stats · Local · Subsonic (`o` on a playlist starts a blended station · `u` restores a deleted playlist) |
+| `y` | lyrics — `[` `]` nudge the sync, `0` resets |
+| `z` autoplay · `t` sleep timer · `,` settings |
 | `Tab` | switch pane · `?` all keys · `q` quit · `esc` back |
 
 Press `?` in the app for the full list at any time.
+
+---
+
+## Scrobbling
+
+pixeltui can submit your plays to **Last.fm** and/or **ListenBrainz**:
+
+1. `pixeltui setup` → *Scrobbling* — paste your Last.fm **API key + shared
+   secret** (both on the [same page](https://www.last.fm/api/account/create))
+   and/or a [ListenBrainz token](https://listenbrainz.org/profile/), and enable it.
+2. For Last.fm, a one-time browser authorization runs at the end of setup
+   (redo anytime with `pixeltui scrobble-auth`).
+
+Plays submit at the standard 50% / 4-minute mark, with a now-playing update at
+track start. Plays made offline are spooled and retried on the next launch.
+Toggle scrobbling live in the in-app settings (`,`).
 
 ---
 
@@ -196,6 +229,7 @@ Press `?` in the app for the full list at any time.
 pixeltui                          open the player (search-first)
 pixeltui [track] [artist]         start seeded from a track
 pixeltui setup                    interactive config wizard
+pixeltui scrobble-auth            authorize Last.fm scrobbling (one-time)
 pixeltui update                   self-update to the latest release
 pixeltui doctor [--fix]           check setup; --fix auto-installs/repairs deps
 pixeltui reset [target]           wipe data: cache | graph | library | config | all
@@ -224,11 +258,19 @@ Run `pixeltui setup`, or edit `~/.pixeltui/config.json`:
 ```json
 {
   "lastfm_key": "",
+  "scrobble": {
+    "enabled": false,
+    "lastfm_secret": "",
+    "lastfm_session": "",
+    "lastfm_user": "",
+    "listenbrainz_token": ""
+  },
   "subsonic": { "url": "", "user": "", "pass": "" },
   "local_dirs": [],
   "download_dir": "",
   "explore": 5,
   "autoplay": true,
+  "seek_step": 10,
   "charts": { "global": true, "country": "" }
 }
 ```
@@ -243,6 +285,8 @@ Every value can also be set by environment variable (env wins over the file):
 | Variable | Meaning |
 |----------|---------|
 | `LASTFM_API_KEY` | Last.fm API key for recommendations |
+| `LASTFM_API_SECRET` | Last.fm shared secret (scrobbling) |
+| `LISTENBRAINZ_TOKEN` | ListenBrainz user token (scrobbling) |
 | `PIXELTUI_SUBSONIC_URL` / `_USER` / `_PASS` | Subsonic/Navidrome server |
 | `PIXELTUI_LOCAL_DIRS` | local music folders (PATH-style list) |
 | `PIXELTUI_DOWNLOAD_DIR` | where downloads are saved |

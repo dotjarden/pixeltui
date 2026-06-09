@@ -24,9 +24,11 @@ import (
 	"github.com/dotjarden/pixeltui/tui/config"
 	"github.com/dotjarden/pixeltui/tui/download"
 	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/lastfm"
 	"github.com/dotjarden/pixeltui/tui/library"
 	"github.com/dotjarden/pixeltui/tui/local"
 	"github.com/dotjarden/pixeltui/tui/lyrics"
+	"github.com/dotjarden/pixeltui/tui/scrobble"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
 	"github.com/dotjarden/pixeltui/tui/ytm"
 )
@@ -186,6 +188,15 @@ type (
 		albums []ytm.Album
 		query  string
 	}
+	artistPageMsg struct { // full artist page (top songs + albums + singles)
+		page *ytm.ArtistPage
+		info *lastfm.ArtistInfo // Last.fm listeners/tags (nil without a key)
+		err  error
+	}
+	albumPageMsg struct { // full album page (ordered tracks + header metadata)
+		detail *ytm.AlbumDetail
+		err    error
+	}
 	artMsg    []string
 	lyricsMsg struct {
 		key    string // trackKey the lyrics were fetched for
@@ -206,6 +217,15 @@ type (
 type lyricsResult struct {
 	synced []lyrics.Line
 	text   string
+}
+
+// backState is one snapshot on the drill-down back stack (esc restores it).
+type backState struct {
+	items  []list.Item
+	header string
+	static bool
+	index  int
+	status string
 }
 
 // browseEntry is one row in the unified browse menu.
@@ -274,6 +294,8 @@ type keyMap struct {
 	Dislike, DislikeNow key.Binding
 	// Queue (contextual) + menus + station.
 	Remove, Clr         key.Binding
+	Undo                key.Binding // u — undo the last destructive queue/playlist op
+	JumpNow             key.Binding // ; — jump to the now-playing track
 	Browse              key.Binding
 	Filter              key.Binding
 	Actions             key.Binding
@@ -289,8 +311,8 @@ func newKeyMap() keyMap {
 		Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		Play:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("↵", "play")),
 		Pause:   key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "pause")),
-		SeekL:   key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "-10s")),
-		SeekR:   key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "+10s")),
+		SeekL:   key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "seek back")),
+		SeekR:   key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "seek fwd")),
 		Next:    key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next")),
 		Tab:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "pane")),
 		Shuffle: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "shuffle")),
@@ -316,6 +338,8 @@ func newKeyMap() keyMap {
 
 		Remove:     key.NewBinding(key.WithKeys("delete", "backspace"), key.WithHelp("del", "remove")),
 		Clr:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clear")),
+		Undo:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "undo")),
+		JumpNow:    key.NewBinding(key.WithKeys(";"), key.WithHelp(";", "go to playing")),
 		Browse:     key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "browse")),
 		Filter:     key.NewBinding(key.WithKeys("'"), key.WithHelp("'", "filter")),
 		Actions:    key.NewBinding(key.WithKeys("."), key.WithHelp(".", "actions")),
@@ -367,16 +391,20 @@ type Config struct {
 	Results       []engine.Candidate
 	Dev           bool
 	Rec           *engine.Recommender
-	URLCache      urlCache         // disk cache for resolved stream URLs (optional)
-	Library       *library.Store   // likes/playlists/history/resume (optional)
-	Subsonic      *subsonic.Client // 2nd source: a Subsonic/Navidrome server (optional)
-	LocalDirs     []string         // 3rd source: local audio folders (optional)
-	DownloadDir   string           // where downloaded tracks are saved (optional)
-	Theme         string           // accent theme name (default/ocean/matrix/amber/rose/mono)
-	DataDir       string           // ~/.pixeltui (for caches like the local index)
-	ChartsGlobal  bool             // show the worldwide Top chart
-	ChartsCountry string           // country (name or 2-letter code) chart ("" = off)
-	Explore       int              // discovery level 0..10 (default 5)
+	URLCache      urlCache            // disk cache for resolved stream URLs (optional)
+	Library       *library.Store      // likes/playlists/history/resume (optional)
+	Subsonic      *subsonic.Client    // 2nd source: a Subsonic/Navidrome server (optional)
+	LocalDirs     []string            // 3rd source: local audio folders (optional)
+	DownloadDir   string              // where downloaded tracks are saved (optional)
+	Theme         string              // accent theme name (default/ocean/matrix/amber/rose/mono)
+	DataDir       string              // ~/.pixeltui (for caches like the local index)
+	ChartsGlobal  bool                // show the worldwide Top chart
+	ChartsCountry string              // country (name or 2-letter code) chart ("" = off)
+	Explore       int                 // discovery level 0..10 (default 5)
+	SeekStep      int                 // ←/→ seek step in seconds (default 10)
+	Scrobbler     *scrobble.Scrobbler // play submission (nil = not configured)
+	ScrobbleOn    bool                // whether scrobbling is currently enabled
+	Lastfm        *lastfm.Client      // read API for artist info pages (optional)
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -411,6 +439,24 @@ type model struct {
 	repeat  repeatMode
 	sleepAt time.Time // zero = no sleep timer; else stop playback at this time
 
+	// Scrobbling: now-playing is announced on play; the scrobble itself fires
+	// once the track passes 50% or 4 minutes (Last.fm's rule), once per play.
+	scrobbler     *scrobble.Scrobbler // nil = not configured
+	scrobbleOn    bool                // live toggle (settings)
+	scrobbleSent  bool                // this play already scrobbled
+	scrobbleStart time.Time           // when the current play started
+
+	seekStep int // ←/→ seek step in seconds
+
+	// Single-slot undo for destructive ops (queue clear/remove/shuffle and
+	// playlist delete) — whichever happened last.
+	undoQueue    []list.Item // queue snapshot to restore (nil = none)
+	undoWhat     string      // label for the status line
+	undoPlaylist string      // deleted playlist name (restored with its tracks)
+	undoTracks   []engine.Candidate
+
+	lyricsOffset float64 // manual synced-lyrics nudge in seconds ([ / ])
+
 	// overlays
 	showLyrics     bool
 	lyricsVP       viewport.Model
@@ -422,6 +468,7 @@ type model struct {
 	showHelp       bool                    // full shortcuts page
 	showStats      bool                    // listening stats page
 	stats          statResult              // computed when the stats page opens
+	statsRange     int                     // 0 = all time · 1 = 30 days · 2 = 7 days
 	showSettings   bool                    // in-app settings overlay
 	settingsCursor int                     // selected settings row
 	themeName      string                  // current accent theme (live-editable)
@@ -450,6 +497,7 @@ type model struct {
 	seedTags     []string
 	dev          bool
 	rec          *engine.Recommender
+	lfm          *lastfm.Client // Last.fm read API (artist info; optional)
 	lib          *library.Store
 	sub          *subsonic.Client
 	localDirs    []string
@@ -470,9 +518,8 @@ type model struct {
 	searchFilterOnly bool // this session only filters (opened via ') — never fetches online
 	searchOnInput    bool // search box is the active element (no result row selected yet)
 
-	// One-level back stack (album chooser → tracks; esc restores the chooser).
-	backItems  []list.Item
-	backHeader string
+	// Back stack for drill-down navigation (search → artist → album · esc pops).
+	backStack []backState
 
 	// "For You" discover landing (sectioned: local + engine recs + genre chart).
 	forYouSeed      engine.Candidate
@@ -492,6 +539,21 @@ type model struct {
 
 func trackKey(c engine.Candidate) string {
 	return strings.ToLower(c.Track) + "|" + strings.ToLower(c.Artist)
+}
+
+// scrobbleDue reports whether a play at pos (of dur seconds) qualifies for a
+// scrobble: the track is at least 30s long, and playback passed half its
+// length or 4 minutes, whichever comes first. Unknown duration (0) falls back
+// to the 4-minute rule alone.
+func scrobbleDue(pos, dur float64) bool {
+	const minLen, capSec = 30, 240
+	if dur > 0 && dur < minLen {
+		return false
+	}
+	if dur > 0 && pos >= dur/2 {
+		return true
+	}
+	return pos >= capSec
 }
 
 func toItems(cs []engine.Candidate) []list.Item {
@@ -555,9 +617,16 @@ func newModel(cfg Config) model {
 		chartsCountry: cfg.ChartsCountry,
 		themeName:     cfg.Theme,
 		explore:       cfg.Explore,
+		seekStep:      cfg.SeekStep,
+		scrobbler:     cfg.Scrobbler,
+		scrobbleOn:    cfg.ScrobbleOn && cfg.Scrobbler != nil,
+		lfm:           cfg.Lastfm,
 	}
 	if m.themeName == "" {
 		m.themeName = "default"
+	}
+	if m.seekStep <= 0 {
+		m.seekStep = 10
 	}
 
 	// Restore the previous session's queue (Up Next) so it survives restarts.
@@ -671,6 +740,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.dur > 0 {
 			m.duration = msg.dur
 		}
+		// Scrobble once the play qualifies: track ≥30s long, past 50% or 4 min
+		// (Last.fm's rule; ListenBrainz follows the same convention).
+		if m.scrobbleOn && !m.scrobbleSent && !msg.paused &&
+			scrobbleDue(m.position, m.duration) {
+			m.scrobbleSent = true
+			m.scrobbler.Scrobble(m.nowC, m.scrobbleStart)
+		}
 		m.paused = msg.paused
 		m.st.paused = msg.paused
 		m.seeking = false
@@ -723,6 +799,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		go notifyNowPlaying(msg.c.Artist, msg.c.Track)
 		if m.lib != nil {
 			m.lib.AddListen(msg.c, time.Now()) // ListenBrainz-style history
+		}
+		// Scrobbling: announce now-playing; the scrobble itself fires from
+		// pollMsg once the play passes 50% / 4 minutes.
+		m.scrobbleSent = false
+		m.scrobbleStart = time.Now()
+		if m.scrobbleOn {
+			m.scrobbler.NowPlaying(msg.c)
 		}
 		if len(m.queue.Items()) == 0 && !m.aqPending {
 			m.aqPending = true
@@ -793,6 +876,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case autoQueueMsg:
 		m.aqPending = false
+		m.loading = false
 		if len(msg.results) > 0 {
 			m.appendQueue(msg.results)
 			if m.now == nil {
@@ -819,6 +903,87 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("%d results", len(msg.results))
 		m.isErr = false
 		// Warm the top results so whichever of the first few they pick is instant.
+		return m, m.preloadResultsTop(3)
+
+	case artistPageMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.status, m.isErr = "artist: "+firstLine(msg.err.Error()), true
+			return m, nil
+		}
+		p := msg.page
+		var items []list.Item
+		addSection := func(label string, rows []list.Item) {
+			if len(rows) == 0 {
+				return
+			}
+			if len(items) > 0 {
+				items = append(items, sectionItem{""})
+			}
+			items = append(items, sectionItem{fmt.Sprintf("%s · %d", label, len(rows))})
+			items = append(items, rows...)
+		}
+		var songs []list.Item
+		for _, c := range p.TopSongs {
+			songs = append(songs, trackItem{c})
+		}
+		addSection("Top Songs", songs)
+		var albums []list.Item
+		for _, a := range p.Albums {
+			albums = append(albums, albumItem{a})
+		}
+		addSection("Albums", albums)
+		var singles []list.Item
+		for _, a := range p.Singles {
+			singles = append(singles, albumItem{a})
+		}
+		addSection("Singles & EPs", singles)
+		if len(items) == 0 {
+			m.status, m.isErr = "artist: nothing found", true
+			return m, nil
+		}
+		m.results.SetItems(items)
+		m.st.focusQueue = false
+		m.staticList = true // entity page: "/" filters it
+		m.header = "ARTIST · " + p.Name
+		m.status, m.isErr = artistBlurb(msg.info), false
+		// Land on the first real track and warm the top songs.
+		for i, it := range items {
+			if _, ok := it.(trackItem); ok {
+				m.results.Select(i)
+				break
+			}
+		}
+		return m, m.preloadResultsTop(3)
+
+	case albumPageMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.status, m.isErr = "album: "+firstLine(msg.err.Error()), true
+			return m, nil
+		}
+		d := msg.detail
+		m.results.SetItems(toItems(d.Tracks))
+		m.results.Select(0)
+		m.st.focusQueue = false
+		m.staticList = true
+		header := "ALBUM · " + d.Album.Title
+		if d.Album.Artist != "" {
+			header += " — " + d.Album.Artist
+		}
+		if d.Album.Year != "" {
+			header += " · " + d.Album.Year
+		}
+		m.header = header
+		total := 0
+		for _, c := range d.Tracks {
+			total += c.DurationSec
+		}
+		blurb := fmt.Sprintf("%d tracks", len(d.Tracks))
+		if total > 0 {
+			blurb += fmt.Sprintf(" · %d min", (total+30)/60)
+		}
+		m.status, m.isErr = blurb+"  ·  e queue all · esc back", false
 		return m, m.preloadResultsTop(3)
 
 	case albumsMsg:
@@ -980,13 +1145,13 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				kind, rest = "track", val
 			}
 			m.closeSearchInput()
-			m.backItems = nil // fresh top-level search clears the back stack
+			m.backStack = nil // fresh top-level search clears the back stack
 			m.loading = true
 			m.status = ""
 			switch kind {
 			case "artist":
 				m.header = "ARTIST · " + rest
-				return m, tea.Batch(cmdArtistTracks(rest), m.spin.Tick)
+				return m, tea.Batch(cmdArtistPage(m.lfm, rest), m.spin.Tick)
 			case "album":
 				m.header = "ALBUMS · " + rest
 				return m, tea.Batch(cmdAlbumSearch(rest), m.spin.Tick)
@@ -1194,7 +1359,11 @@ func (m *model) rebuildForYou() {
 		items = append(items, rows...)
 	}
 	add("Your Music", m.fyLocal)
-	add("Recommended for You", m.fyRecs)
+	recLabel := "Recommended for You"
+	if m.forYouSeed.Artist != "" {
+		recLabel += " — because you play " + m.forYouSeed.Artist
+	}
+	add(recLabel, m.fyRecs)
 	if len(m.fyChart) > 0 {
 		label := m.fyChartLabel
 		if label == "" {
@@ -1256,6 +1425,70 @@ func (m *model) skipResultSections(msg tea.KeyMsg) {
 			m.results.Select(i)
 			return
 		}
+	}
+}
+
+// recReason turns an engine discovery path into a human "why this?" line.
+// Non-recommender paths ("ytmusic", "subsonic", …) yield "".
+func recReason(path string) string {
+	switch {
+	case path == "direct similar":
+		return "because it's similar to the seed track"
+	case strings.HasPrefix(path, "via "):
+		return "via " + strings.TrimPrefix(path, "via ") + " (a similar artist)"
+	}
+	return ""
+}
+
+// pushBack snapshots the current Discover view onto the drill-down stack so
+// esc can restore it (depth-capped — older entries fall off).
+func (m *model) pushBack() {
+	m.backStack = append(m.backStack, backState{
+		items:  m.results.Items(),
+		header: m.header,
+		static: m.staticList,
+		index:  m.results.Index(),
+		status: m.status,
+	})
+	if len(m.backStack) > 8 {
+		m.backStack = m.backStack[1:]
+	}
+}
+
+// artistBlurb renders the one-line artist stat strip from Last.fm info.
+func artistBlurb(info *lastfm.ArtistInfo) string {
+	if info == nil {
+		return "↵ play · e queue all · esc back"
+	}
+	var parts []string
+	if info.Listeners > 0 {
+		parts = append(parts, fmtCount(info.Listeners)+" listeners")
+	}
+	if info.Playcount > 0 {
+		parts = append(parts, fmtCount(info.Playcount)+" plays")
+	}
+	if len(info.Tags) > 0 {
+		tags := info.Tags
+		if len(tags) > 3 {
+			tags = tags[:3]
+		}
+		parts = append(parts, strings.Join(tags, ", "))
+	}
+	if len(parts) == 0 {
+		return "↵ play · e queue all · esc back"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// fmtCount formats big counts as "1.2M" / "345K".
+func fmtCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.0fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
 	}
 }
 
@@ -1445,13 +1678,20 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Listening stats page captures input: b / esc closes, q quits.
+	// Listening stats page captures input: b / esc closes, q quits, and
+	// ←/→ (or tab) cycles the date range (all time / 30 days / 7 days).
 	if m.showStats {
 		switch {
 		case key.Matches(msg, k.Browse), key.Matches(msg, k.Esc):
 			m.showStats = false
 		case key.Matches(msg, k.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, k.SeekR), key.Matches(msg, k.Tab):
+			m.statsRange = (m.statsRange + 1) % 3
+			m.stats = m.computeStats()
+		case key.Matches(msg, k.SeekL):
+			m.statsRange = (m.statsRange + 2) % 3
+			m.stats = m.computeStats()
 		}
 		return m, nil
 	}
@@ -1525,6 +1765,10 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.selectBrowse()
 		case key.Matches(msg, k.Remove): // delete the highlighted user playlist
 			return m.deleteBrowsePlaylist()
+		case key.Matches(msg, k.Undo): // restore the last deleted playlist
+			return m.undoBrowseDelete()
+		case key.Matches(msg, k.Station): // multi-seed station from a playlist
+			return m.stationFromBrowse()
 		case key.Matches(msg, k.Playlist): // 'p' = rename the highlighted playlist
 			if e := m.browseSel(); e != nil && e.kind == "playlist" {
 				m.showBrowse = false
@@ -1577,9 +1821,9 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case key.Matches(msg, k.SeekL):
-			return m.seek(-10)
+			return m.seek(-float64(m.seekStep))
 		case key.Matches(msg, k.SeekR):
-			return m.seek(10)
+			return m.seek(float64(m.seekStep))
 		case key.Matches(msg, k.Next):
 			if len(m.queue.Items()) > 0 {
 				return m, m.advanceForce()
@@ -1598,6 +1842,21 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Synced-lyric timing nudge: [ earlier · ] later · 0 reset. Sticks for
+		// the session (timing drift is usually systematic, not per-track).
+		if len(m.lyricsSynced) > 0 {
+			switch msg.String() {
+			case "[":
+				m.lyricsOffset -= 0.5
+				return m, nil
+			case "]":
+				m.lyricsOffset += 0.5
+				return m, nil
+			case "0":
+				m.lyricsOffset = 0
+				return m, nil
+			}
+		}
 		// Synced lyrics auto-follow; only plain lyrics need manual scrolling.
 		if len(m.lyricsSynced) > 0 {
 			return m, nil
@@ -1613,13 +1872,15 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case key.Matches(msg, k.Esc):
-		// Back out of an album's tracklist to the album chooser.
-		if m.backItems != nil {
-			m.results.SetItems(m.backItems)
-			m.results.Select(0)
-			m.header = m.backHeader
-			m.backItems = nil
-			m.staticList = true
+		// Pop the drill-down stack (album → artist → search results …).
+		if n := len(m.backStack); n > 0 {
+			s := m.backStack[n-1]
+			m.backStack = m.backStack[:n-1]
+			m.results.SetItems(s.items)
+			m.results.Select(s.index)
+			m.header = s.header
+			m.staticList = s.static
+			m.status, m.isErr = s.status, false
 			return m, nil
 		}
 		return m, nil
@@ -1662,10 +1923,10 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, k.SeekL):
-		return m.seek(-10)
+		return m.seek(-float64(m.seekStep))
 
 	case key.Matches(msg, k.SeekR):
-		return m.seek(10)
+		return m.seek(float64(m.seekStep))
 
 	case key.Matches(msg, k.Next):
 		if len(m.queue.Items()) > 0 {
@@ -1737,21 +1998,31 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// ── queue (contextual) ─────────────────────────────────────────────────────
 	case key.Matches(msg, k.Remove):
-		if m.st.focusQueue {
+		if m.st.focusQueue && len(m.queue.Items()) > 0 {
+			m.snapshotQueue("remove")
 			m.removeQueueAt(m.queue.Index())
 		}
 		return m, nil
 	case key.Matches(msg, k.Clr):
+		if len(m.queue.Items()) == 0 {
+			return m, nil
+		}
+		m.snapshotQueue("clear")
 		m.queue.SetItems(nil)
-		m.status = "Queue cleared"
+		m.status = "Queue cleared — u to undo"
 		return m, nil
 	case key.Matches(msg, k.Shuffle):
 		if len(m.queue.Items()) > 1 {
+			m.snapshotQueue("shuffle")
 			m.shuffleQueue()
-			m.status, m.isErr = "Queue shuffled", false
+			m.status, m.isErr = "Queue shuffled — u to undo", false
 			return m, m.preloadQueue(2)
 		}
 		return m, nil
+	case key.Matches(msg, k.Undo):
+		return m.undoLast()
+	case key.Matches(msg, k.JumpNow):
+		return m.jumpToNowPlaying()
 	case key.Matches(msg, k.Repeat):
 		m.repeat = (m.repeat + 1) % 3
 		m.status, m.isErr = m.repeat.String(), false
@@ -1948,6 +2219,12 @@ func (m model) openActions() (tea.Model, tea.Cmd) {
 		{"Add to playlist…", "playlist"},
 		{"Start station", "station"},
 	}
+	if c.Artist != "" {
+		items = append(items, actionEntry{"Go to artist — " + truncate(c.Artist, 28), "goartist"})
+	}
+	if c.Album != "" {
+		items = append(items, actionEntry{"Go to album — " + truncate(c.Album, 28), "goalbum"})
+	}
 	if download.Downloadable(c) {
 		items = append(items, actionEntry{"Download", "download"})
 	}
@@ -1983,6 +2260,16 @@ func (m model) selectAction() (tea.Model, tea.Cmd) {
 		return m.addToPlaylistFor(c, true)
 	case "station":
 		return m.stationCand(c, true)
+	case "goartist":
+		m.pushBack()
+		m.loading, m.status, m.isErr = true, "", false
+		m.header = "ARTIST · " + c.Artist
+		return m, tea.Batch(cmdArtistPage(m.lfm, c.Artist), m.spin.Tick)
+	case "goalbum":
+		m.pushBack()
+		m.loading, m.status, m.isErr = true, "", false
+		m.header = "ALBUM · " + c.Album
+		return m, tea.Batch(cmdGoAlbum(c.Album, c.Artist), m.spin.Tick)
 	case "download":
 		return m.downloadCand(c, true)
 	case "dislike":
@@ -2076,15 +2363,19 @@ func (m model) browseSel() *browseEntry {
 }
 
 // deleteBrowsePlaylist deletes the highlighted user playlist (stays in browse).
+// The contents are kept in the undo slot so `u` can restore it.
 func (m model) deleteBrowsePlaylist() (tea.Model, tea.Cmd) {
 	e := m.browseSel()
 	if e == nil || e.kind != "playlist" {
 		return m, nil
 	}
+	tracks, _ := m.lib.LoadPlaylist(e.id) // snapshot before the file goes away
 	if err := m.lib.DeletePlaylist(e.id); err != nil {
 		m.status, m.isErr = "delete failed: "+firstLine(err.Error()), true
 		return m, nil
 	}
+	m.undoPlaylist, m.undoTracks = e.id, tracks
+	m.undoQueue, m.undoWhat = nil, ""
 	name := e.id
 	for i, be := range m.browseAll {
 		if be.kind == "playlist" && be.id == name {
@@ -2096,7 +2387,79 @@ func (m model) deleteBrowsePlaylist() (tea.Model, tea.Cmd) {
 	if m.browseCursor >= len(m.browseItems) && m.browseCursor > 0 {
 		m.browseCursor--
 	}
-	m.status, m.isErr = "Deleted playlist “"+name+"”", false
+	m.status, m.isErr = "Deleted playlist “"+name+"” — u to undo", false
+	return m, nil
+}
+
+// stationFromBrowse starts a multi-seed station from the highlighted playlist
+// (or Liked Songs): up to 4 randomly-sampled tracks seed a blended endless mix.
+func (m model) stationFromBrowse() (tea.Model, tea.Cmd) {
+	e := m.browseSel()
+	if e == nil || m.lib == nil {
+		return m, nil
+	}
+	var name string
+	var tracks []engine.Candidate
+	switch e.kind {
+	case "liked":
+		name = library.LikedName
+		tracks = m.lib.Liked()
+	case "playlist":
+		name = e.id
+		tracks, _ = m.lib.LoadPlaylist(e.id)
+	default:
+		return m, nil
+	}
+	if m.rec == nil {
+		m.showBrowse = false
+		m.status, m.isErr = "Stations need a Last.fm key — run 'pixeltui setup'", true
+		return m, nil
+	}
+	if len(tracks) == 0 {
+		m.status, m.isErr = "“"+name+"” is empty", true
+		return m, nil
+	}
+	seeds := sampleSeeds(tracks, 4)
+	m.showBrowse = false
+	m.st.focusQueue = false
+	m.autoQueue = true
+	m.queue.SetItems(nil)
+	m.aqPending = true
+	m.loading = true
+	m.status, m.isErr = fmt.Sprintf("Station from “%s” — blending %d seeds…", name, len(seeds)), false
+	return m, tea.Batch(cmdMultiStation(m.rec, seeds), m.spin.Tick)
+}
+
+// sampleSeeds picks up to n distinct random tracks as station seeds.
+func sampleSeeds(tracks []engine.Candidate, n int) []engine.Seed {
+	seeds := make([]engine.Seed, 0, n)
+	for _, i := range rand.Perm(len(tracks)) {
+		c := tracks[i]
+		if c.Artist == "" && c.Track == "" {
+			continue
+		}
+		seeds = append(seeds, engine.Seed{Artist: c.Artist, Track: c.Track})
+		if len(seeds) >= n {
+			break
+		}
+	}
+	return seeds
+}
+
+// undoBrowseDelete restores the last deleted playlist from inside browse.
+func (m model) undoBrowseDelete() (tea.Model, tea.Cmd) {
+	if m.undoPlaylist == "" || m.lib == nil {
+		return m, nil
+	}
+	name := m.undoPlaylist
+	if err := m.lib.SavePlaylist(name, m.undoTracks); err != nil {
+		m.status, m.isErr = "undo failed: "+firstLine(err.Error()), true
+		return m, nil
+	}
+	m.undoPlaylist, m.undoTracks = "", nil
+	m.browseAll = append(m.browseAll, browseEntry{label: "≡  " + name, kind: "playlist", id: name})
+	m.applyBrowseFilter()
+	m.status, m.isErr = "Restored playlist “"+name+"”", false
 	return m, nil
 }
 
@@ -2214,11 +2577,10 @@ func (m model) playSelected() (tea.Model, tea.Cmd) {
 	} else {
 		switch it := m.results.SelectedItem().(type) {
 		case albumItem:
-			// Drill into the album's tracks; remember the chooser for esc-back.
-			m.backItems = m.results.Items()
-			m.backHeader = m.header
+			// Drill into the album page; remember this view for esc-back.
+			m.pushBack()
 			m.loading, m.status, m.isErr = true, "", false
-			return m, tea.Batch(cmdAlbumTracks(it.a), m.spin.Tick)
+			return m, tea.Batch(cmdAlbumPage(it.a), m.spin.Tick)
 		case trackItem:
 			c = it.c
 		default:
@@ -2455,6 +2817,70 @@ func (m *model) preloadItems(items []list.Item, n int) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// snapshotQueue stores a copy of the queue for single-slot undo. It clears any
+// pending playlist undo (one slot, last action wins).
+func (m *model) snapshotQueue(what string) {
+	items := m.queue.Items()
+	cp := make([]list.Item, len(items))
+	copy(cp, items)
+	m.undoQueue, m.undoWhat = cp, what
+	m.undoPlaylist, m.undoTracks = "", nil
+}
+
+// undoLast restores the last destructive action: a queue snapshot or a deleted
+// playlist, whichever happened most recently.
+func (m model) undoLast() (tea.Model, tea.Cmd) {
+	switch {
+	case m.undoPlaylist != "":
+		if m.lib == nil {
+			return m, nil
+		}
+		if err := m.lib.SavePlaylist(m.undoPlaylist, m.undoTracks); err != nil {
+			m.status, m.isErr = "undo failed: "+firstLine(err.Error()), true
+			return m, nil
+		}
+		m.status, m.isErr = "Restored playlist “"+m.undoPlaylist+"”", false
+		m.undoPlaylist, m.undoTracks = "", nil
+		return m, nil
+	case m.undoQueue != nil:
+		m.queue.SetItems(m.undoQueue)
+		m.status, m.isErr = "Undid queue "+m.undoWhat, false
+		m.undoQueue, m.undoWhat = nil, ""
+		return m, m.preloadQueue(2)
+	}
+	m.status, m.isErr = "Nothing to undo", false
+	return m, nil
+}
+
+// jumpToNowPlaying selects the playing track wherever it is — the Discover
+// list first, then the queue (switching focus to match).
+func (m model) jumpToNowPlaying() (tea.Model, tea.Cmd) {
+	if m.now == nil || m.st.nowKey == "" {
+		m.status, m.isErr = "Nothing playing", false
+		return m, nil
+	}
+	find := func(items []list.Item) int {
+		for i, it := range items {
+			if ti, ok := it.(trackItem); ok && trackKey(ti.c) == m.st.nowKey {
+				return i
+			}
+		}
+		return -1
+	}
+	if i := find(m.results.Items()); i >= 0 {
+		m.st.focusQueue = false
+		m.results.Select(i)
+		return m, nil
+	}
+	if i := find(m.queue.Items()); i >= 0 {
+		m.st.focusQueue = true
+		m.queue.Select(i)
+		return m, nil
+	}
+	m.status, m.isErr = "“"+truncate(m.nowC.Track, 30)+"” isn't in these lists", false
+	return m, nil
+}
+
 // ── queue helpers ─────────────────────────────────────────────────────────────
 
 func (m *model) queueHead() *engine.Candidate {
@@ -2645,13 +3071,35 @@ type statCount struct {
 	n     int
 }
 
-// computeStats aggregates the play history into headline counts and top lists.
+// statsRangeCutoff returns the history cutoff for the active range (zero time
+// = all history) and its display label.
+func statsRangeCutoff(rng int) (time.Time, string) {
+	switch rng {
+	case 1:
+		return time.Now().AddDate(0, 0, -30), "LAST 30 DAYS"
+	case 2:
+		return time.Now().AddDate(0, 0, -7), "LAST 7 DAYS"
+	default:
+		return time.Time{}, "ALL TIME"
+	}
+}
+
+// computeStats aggregates the play history into headline counts and top lists,
+// restricted to the active date range.
 func (m model) computeStats() statResult {
 	var r statResult
 	if m.lib == nil {
 		return r
 	}
-	hist, _ := m.lib.History(5000)
+	cutoff, _ := statsRangeCutoff(m.statsRange)
+	listens, _ := m.lib.Listens(5000)
+	hist := make([]engine.Candidate, 0, len(listens))
+	for _, l := range listens {
+		if !cutoff.IsZero() && l.At.Before(cutoff) {
+			break // most-recent first: everything after this is older
+		}
+		hist = append(hist, l.Candidate)
+	}
 	r.plays = len(hist)
 	artistN, artistName := map[string]int{}, map[string]string{}
 	trackN, trackLabel := map[string]int{}, map[string]string{}
@@ -2699,11 +3147,14 @@ func (m model) viewStats() string {
 		contentH = 4
 	}
 	s := m.stats
+	_, rangeLabel := statsRangeCutoff(m.statsRange)
+	title := stTitle.Render("LISTENING STATS") + "  " + stArtist.Render("· "+rangeLabel) +
+		"  " + stDim.Render("(←/→ range)")
 
 	if s.plays == 0 {
 		body := lipgloss.JoinVertical(lipgloss.Left,
-			stTitle.Render("LISTENING STATS"), "",
-			stDim.Render("  No listening history yet — play something and check back."))
+			title, "",
+			stDim.Render("  Nothing in this range yet — play something and check back."))
 		return paneStyle(true).Width(m.width - 2).Height(contentH - 2).Render(body)
 	}
 
@@ -2734,14 +3185,17 @@ func (m model) viewStats() string {
 		renderCol("TOP ARTISTS", s.topArtists), "   ", renderCol("TOP TRACKS", s.topTracks))
 
 	body := lipgloss.JoinVertical(lipgloss.Left,
-		stTitle.Render("LISTENING STATS"), "", headline, "", cols, "",
-		stDim.Render("  b / esc to close"))
+		title, "", headline, "", cols, "",
+		stDim.Render("  ←/→ or tab: date range · b / esc to close"))
 	return paneStyle(true).Width(m.width - 2).Height(contentH - 2).Render(body)
 }
 
 // ── settings overlay ─────────────────────────────────────────────────────────
 
-const settingsRows = 5
+const settingsRows = 7
+
+// seekSteps are the ←/→ seek-step choices the settings overlay cycles through.
+var seekSteps = []int{5, 10, 15, 30, 60}
 
 // updateSettings handles input while the settings overlay is open. Changes apply
 // live; closing (, or esc) persists them to config.json.
@@ -2796,6 +3250,20 @@ func (m *model) changeSetting(row, dir int) {
 		}
 		i = (i + dir + len(chartCountryList)) % len(chartCountryList)
 		m.chartsCountry = chartCountryList[i]
+	case 5: // scrobbling (needs configured credentials)
+		if m.scrobbler != nil {
+			m.scrobbleOn = !m.scrobbleOn
+		}
+	case 6: // seek step
+		i := 0
+		for j, s := range seekSteps {
+			if s == m.seekStep {
+				i = j
+				break
+			}
+		}
+		i = (i + dir + len(seekSteps)) % len(seekSteps)
+		m.seekStep = seekSteps[i]
 	}
 }
 
@@ -2813,6 +3281,10 @@ func (m model) saveSettings() {
 	cfg.Autoplay = m.autoQueue
 	cfg.Charts.Global = m.chartsGlobal
 	cfg.Charts.Country = m.chartsCountry
+	cfg.SeekStep = m.seekStep
+	if m.scrobbler != nil { // only meaningful when credentials are configured
+		cfg.Scrobble.Enabled = m.scrobbleOn
+	}
 	_ = cfg.Save(m.dataDir)
 }
 
@@ -2848,6 +3320,10 @@ func (m model) viewSettings() string {
 	if country == "" {
 		country = "(off)"
 	}
+	scrob := "(not set up — run 'pixeltui setup')"
+	if m.scrobbler != nil {
+		scrob = onOff(m.scrobbleOn) + " · " + m.scrobbler.Targets()
+	}
 	body := lipgloss.JoinVertical(lipgloss.Left,
 		stTitle.Render("⚙  SETTINGS"), "",
 		row(0, "Theme", m.themeName),
@@ -2855,6 +3331,8 @@ func (m model) viewSettings() string {
 		row(2, "Autoplay", onOff(m.autoQueue)),
 		row(3, "Global chart", onOff(m.chartsGlobal)),
 		row(4, "Country chart", country),
+		row(5, "Scrobbling", scrob),
+		row(6, "Seek step", fmt.Sprintf("%ds", m.seekStep)),
 		"",
 		stDim.Render("↑↓ move · ◂ ▸ (or ←/→) change · , or esc to save & close"),
 	)
@@ -2893,16 +3371,18 @@ func (m model) viewHelpPage() string {
 		{"PgUp PgDn", "jump a page"},
 		{"g G", "top / bottom"},
 		{"Tab", "switch pane"},
-		{"↵", "play selected"},
-		{"esc", "back"},
+		{"↵", "play selected · open album"},
+		{";", "jump to the playing track"},
+		{"esc", "back (artist/album pages)"},
 		{"q", "quit"},
 	})
 	playback := section("PLAYBACK", []row{
 		{"space", "pause / resume"},
-		{"← →", "seek 10s  (h l)"},
+		{"← →", "seek  (h l · step in settings)"},
 		{"n", "next track"},
 		{"+ −", "volume up / down"},
 		{"y", "lyrics (synced)"},
+		{"[ ] 0", "nudge / reset lyric sync"},
 		{"o O", "station: selected / playing"},
 	})
 	track := section("TRACK   (lower=selected · ⇧=playing)", []row{
@@ -2912,14 +3392,14 @@ func (m model) viewHelpPage() string {
 		{"p P", "add to playlist"},
 		{"d D", "download"},
 		{"x X", "mute artist (X also skips)"},
-		{".", "actions menu (all + more)"},
+		{".", "actions · go to artist/album"},
 	})
 	search := section("SEARCH   (/ online · ' filter only)", []row{
 		{"type", "filter the list live"},
 		{"↓", "move into results"},
 		{"↵ on box", "search online"},
 		{"↵ on row", "play the result"},
-		{"!a !al", "artist / album (bangs)"},
+		{"!a !al", "artist page / albums (bangs)"},
 	})
 	queue := section("QUEUE   (Up Next · Tab)", []row{
 		{"j k", "reorder selected"},
@@ -2927,21 +3407,24 @@ func (m model) viewHelpPage() string {
 		{"s", "shuffle"},
 		{"r", "repeat off / all / one"},
 		{"c", "clear"},
+		{"u", "undo clear/remove/shuffle"},
 		{"z", "autoplay · t sleep timer"},
 	})
 	browse := section("BROWSE & MORE   (b)", []row{
 		{"b", "open browse menu"},
-		{",", "settings (theme, etc.)"},
+		{",", "settings (theme, scrobbling…)"},
 		{"↵", "open entry"},
+		{"o", "station from a playlist (blend)"},
 		{"/", "filter entries"},
-		{"del p", "delete / rename playlist"},
+		{"del p u", "delete / rename / restore"},
 	})
 
 	gap := "    "
 	notes := lipgloss.JoinVertical(lipgloss.Left,
-		stDim.Render("Browse (b):  Liked · Playlists · Charts (Global/Country) · Listening Stats · Local · Subsonic"),
+		stDim.Render("Browse (b):  Liked · Playlists · Charts (Global/Country) · Listening Stats (←/→ date range) · Local · Subsonic"),
 		stDim.Render("Search (/):  type to filter · ↓ into results · ↵ on the box searches online (YouTube/Subsonic)"),
-		stDim.Render("Bangs:       !a <artist> → top songs    !al <album> → pick an album, then its tracks"),
+		stDim.Render("Bangs:       !a <artist> → artist page (top songs · albums · singles)    !al <album> → album pages"),
+		stDim.Render("Scrobbling:  Last.fm + ListenBrainz — set up once via 'pixeltui setup', toggle in settings (,)"),
 	)
 	footer := stDim.Render("? or esc to close · q quit")
 
@@ -3001,7 +3484,12 @@ func (m model) viewActions() string {
 	var b strings.Builder
 	head := truncate(m.actionsTrack.Track+" — "+m.actionsTrack.Artist, m.width-16)
 	b.WriteString(stTitle.Render("ACTIONS") + "  " + stArtist.Render(head) + "\n")
-	b.WriteString(stDim.Render("   ↑/↓ · ↵ run · esc close") + "\n\n")
+	b.WriteString(stDim.Render("   ↑/↓ · ↵ run · esc close") + "\n")
+	// "Why this?" — recommender candidates carry their discovery path.
+	if why := recReason(m.actionsTrack.Path); why != "" {
+		b.WriteString(stDim.Render("   recommended "+why) + "\n")
+	}
+	b.WriteString("\n")
 	for i, e := range m.actionsItems {
 		if i == m.actionsCursor {
 			b.WriteString(stSelBar.Render("▏") + stSelText.Render(" "+e.label) + "\n")
@@ -3020,6 +3508,9 @@ func (m model) viewLyrics() string {
 	label := "LYRICS"
 	if len(m.lyricsSynced) > 0 {
 		label = "LYRICS ♪ synced"
+		if m.lyricsOffset != 0 {
+			label += fmt.Sprintf(" %+.1fs", m.lyricsOffset)
+		}
 	}
 	title := stTitle.Render(label) + "  " + stArtist.Render(truncate(m.lyricsTrack, m.width-20))
 	if m.lyricsBusy {
@@ -3041,8 +3532,9 @@ func (m model) renderSyncedLyrics(height int) string {
 	if height < 1 {
 		height = 1
 	}
-	// Active line = last timestamp <= current (interpolated) position.
-	pos := m.effectivePos()
+	// Active line = last timestamp <= current (interpolated) position, shifted
+	// by the manual sync nudge ([ / ]).
+	pos := m.effectivePos() + m.lyricsOffset
 	active := 0
 	for i, l := range lines {
 		if l.T <= pos+0.15 { // tiny lead so the line flips slightly early
@@ -3276,21 +3768,72 @@ func parseBang(q string) (kind, rest string) {
 	return "track", q // unknown bang → search the whole string as tracks
 }
 
-// cmdArtistTracks resolves the top artist match and loads their top songs.
-func cmdArtistTracks(query string) tea.Cmd {
+// cmdArtistPage resolves the top artist match and loads their full page (top
+// songs, albums, singles), enriched with Last.fm listener stats when a key is
+// configured. The two fetches run concurrently.
+func cmdArtistPage(lfm *lastfm.Client, query string) tea.Cmd {
 	return func() tea.Msg {
 		arts, err := ytm.SearchArtists(query, 1)
 		if err != nil {
-			return searchMsg{err: err}
+			return artistPageMsg{err: err}
 		}
 		if len(arts) == 0 {
-			return searchMsg{err: fmt.Errorf("no artist found for %q", query)}
+			return artistPageMsg{err: fmt.Errorf("no artist found for %q", query)}
 		}
-		songs, err := ytm.ArtistTopSongs(arts[0].BrowseID, 40)
+
+		infoCh := make(chan *lastfm.ArtistInfo, 1)
+		go func() { // best-effort; nil on any failure
+			if lfm == nil {
+				infoCh <- nil
+				return
+			}
+			info, err := lfm.GetArtistInfo(arts[0].Name)
+			if err != nil {
+				infoCh <- nil
+				return
+			}
+			infoCh <- info
+		}()
+
+		page, err := ytm.BrowseArtist(arts[0].BrowseID)
 		if err != nil {
-			return searchMsg{err: err}
+			return artistPageMsg{err: err}
 		}
-		return searchMsg{results: songs, header: "ARTIST · " + arts[0].Name}
+		if page.Name == "" {
+			page.Name = arts[0].Name
+		}
+		// Artist pages give top songs without a per-row album sometimes; fine.
+		return artistPageMsg{page: page, info: <-infoCh}
+	}
+}
+
+// cmdGoAlbum finds the album entity for a track's album+artist and opens its
+// page (used by the "Go to album" action).
+func cmdGoAlbum(album, artist string) tea.Cmd {
+	return func() tea.Msg {
+		hits, err := ytm.SearchAlbums(album+" "+artist, 5)
+		if err != nil {
+			return albumPageMsg{err: err}
+		}
+		// Prefer an exact-ish title match by the same artist; else first hit.
+		pick := -1
+		for i, a := range hits {
+			if strings.EqualFold(strings.TrimSpace(a.Title), strings.TrimSpace(album)) {
+				pick = i
+				break
+			}
+		}
+		if pick < 0 {
+			if len(hits) == 0 {
+				return albumPageMsg{err: fmt.Errorf("no album found for %q", album)}
+			}
+			pick = 0
+		}
+		detail, err := ytm.BrowseAlbum(hits[pick], 60)
+		if err != nil {
+			return albumPageMsg{err: err}
+		}
+		return albumPageMsg{detail: detail}
 	}
 }
 
@@ -3305,14 +3848,14 @@ func cmdAlbumSearch(query string) tea.Cmd {
 	}
 }
 
-// cmdAlbumTracks drills into one album's tracklist.
-func cmdAlbumTracks(a ytm.Album) tea.Cmd {
+// cmdAlbumPage drills into one album's full page (ordered tracks + metadata).
+func cmdAlbumPage(a ytm.Album) tea.Cmd {
 	return func() tea.Msg {
-		tracks, err := ytm.AlbumTracks(a, 60)
+		detail, err := ytm.BrowseAlbum(a, 60)
 		if err != nil {
-			return searchMsg{err: err}
+			return albumPageMsg{err: err}
 		}
-		return searchMsg{results: tracks, header: "ALBUM · " + a.Title}
+		return albumPageMsg{detail: detail}
 	}
 }
 

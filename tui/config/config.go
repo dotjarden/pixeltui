@@ -23,21 +23,34 @@ type Charts struct {
 	Country string `json:"country"` // e.g. "United States" — empty disables the country chart
 }
 
+// Scrobble holds play-submission settings. Last.fm needs an API key + shared
+// secret + a one-time authorized session key (`pixeltui scrobble-auth` or
+// setup); ListenBrainz just needs the user token from listenbrainz.org/profile.
+type Scrobble struct {
+	Enabled           bool   `json:"enabled"`            // master switch (both services)
+	LastfmSecret      string `json:"lastfm_secret"`      // Last.fm API shared secret
+	LastfmSession     string `json:"lastfm_session"`     // authorized session key
+	LastfmUser        string `json:"lastfm_user"`        // username (informational)
+	ListenBrainzToken string `json:"listenbrainz_token"` // ListenBrainz user token
+}
+
 // Config is the persisted application configuration.
 type Config struct {
 	LastfmKey   string   `json:"lastfm_key"`
+	Scrobble    Scrobble `json:"scrobble"` // Last.fm / ListenBrainz play submission
 	Subsonic    Subsonic `json:"subsonic"`
 	LocalDirs   []string `json:"local_dirs"`   // folders of local audio files
 	DownloadDir string   `json:"download_dir"` // where downloads are saved
 	Theme       string   `json:"theme"`        // accent theme name (default if empty)
 	Explore     int      `json:"explore"`      // 0..10, default 5
 	Autoplay    bool     `json:"autoplay"`     // default true
+	SeekStep    int      `json:"seek_step"`    // seek step in seconds, default 10
 	Charts      Charts   `json:"charts"`       // optional global/country charts
 }
 
 // Default returns a Config with sensible defaults (Explore=5, Autoplay=true).
 func Default() *Config {
-	return &Config{Explore: 5, Autoplay: true, Charts: Charts{Global: true}}
+	return &Config{Explore: 5, Autoplay: true, SeekStep: 10, Charts: Charts{Global: true}}
 }
 
 // Path returns the config file path for the given data directory.
@@ -65,6 +78,9 @@ func Load(dataDir string) (*Config, error) {
 	}
 
 	c.applyEnv()
+	if c.SeekStep <= 0 {
+		c.SeekStep = 10 // older configs predate the field
+	}
 	return c, nil
 }
 
@@ -72,6 +88,12 @@ func Load(dataDir string) (*Config, error) {
 func (c *Config) applyEnv() {
 	if v, ok := os.LookupEnv("LASTFM_API_KEY"); ok {
 		c.LastfmKey = v
+	}
+	if v, ok := os.LookupEnv("LASTFM_API_SECRET"); ok {
+		c.Scrobble.LastfmSecret = v
+	}
+	if v, ok := os.LookupEnv("LISTENBRAINZ_TOKEN"); ok {
+		c.Scrobble.ListenBrainzToken = v
 	}
 	if v, ok := os.LookupEnv("PIXELTUI_SUBSONIC_URL"); ok {
 		c.Subsonic.URL = v
@@ -139,6 +161,17 @@ func (c *Config) Save(dataDir string) error {
 	}
 
 	return os.Rename(tmpName, Path(dataDir))
+}
+
+// LastfmScrobbleReady reports whether Last.fm scrobbling is fully configured
+// (key + shared secret + an authorized session key).
+func (c *Config) LastfmScrobbleReady() bool {
+	return c.LastfmKey != "" && c.Scrobble.LastfmSecret != "" && c.Scrobble.LastfmSession != ""
+}
+
+// ScrobbleReady reports whether at least one scrobble target is configured.
+func (c *Config) ScrobbleReady() bool {
+	return c.LastfmScrobbleReady() || c.Scrobble.ListenBrainzToken != ""
 }
 
 // HasSubsonic reports whether a Subsonic URL is configured.
