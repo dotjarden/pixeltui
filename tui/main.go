@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
+	"github.com/mattn/go-isatty"
 
 	"github.com/dotjarden/pixeltui/tui/config"
 	"github.com/dotjarden/pixeltui/tui/engine"
@@ -131,6 +132,16 @@ func cmdRecommend(args []string) {
 	// Config file (~/.pixeltui/config.json) merged with env overrides.
 	cfg, _ := config.Load(dir)
 
+	// First launch with no config + a real terminal + no seed → guided setup,
+	// then reload so the rest of this run sees the new settings.
+	if !*noTUIFlag && len(fs.Args()) == 0 && *artistFlag == "" && *trackFlag == "" {
+		if _, statErr := os.Stat(config.Path(dir)); os.IsNotExist(statErr) &&
+			isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
+			maybeOnboard(dir)
+			cfg, _ = config.Load(dir)
+		}
+	}
+
 	// API key precedence: --key  >  env/file (config already merged both).
 	apiKey := *keyFlag
 	if apiKey == "" {
@@ -228,6 +239,7 @@ func cmdRecommend(args []string) {
 			DataDir:       dir,
 			ChartsGlobal:  cfg.Charts.Global,
 			ChartsCountry: cfg.Charts.Country,
+			Explore:       cfg.Explore,
 		})
 		return
 	}
@@ -326,6 +338,7 @@ func cmdRecommend(args []string) {
 		DataDir:       dir,
 		ChartsGlobal:  cfg.Charts.Global,
 		ChartsCountry: cfg.Charts.Country,
+		Explore:       cfg.Explore,
 	})
 }
 
@@ -539,26 +552,79 @@ func cmdSetup(_ []string) {
 	if err != nil {
 		fatalf("%v", err)
 	}
+	if err := runSetup(dir); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			fmt.Println("Setup cancelled — nothing saved.")
+			return
+		}
+		fatalf("setup: %v", err)
+	}
+}
+
+// chartCountries are the country-chart options offered in setup (name → resolved
+// to a code at runtime by the TUI).
+var chartCountries = []string{
+	"United States", "United Kingdom", "Canada", "Australia", "Ireland",
+	"New Zealand", "Germany", "France", "Spain", "Italy", "Netherlands",
+	"Sweden", "Norway", "Denmark", "Poland", "Brazil", "Mexico", "Argentina",
+	"Japan", "South Korea", "India", "Indonesia", "Philippines", "Nigeria",
+	"South Africa",
+}
+
+// runSetup shows the interactive configuration form, saves it, and reports
+// connection tests. Shared by `setup` and first-run onboarding.
+func runSetup(dir string) error {
 	cfg, _ := config.Load(dir)
 	if cfg.Theme == "" {
 		cfg.Theme = "default"
 	}
 	localCSV := strings.Join(cfg.LocalDirs, ", ")
 
+	exploreOpts := make([]huh.Option[int], 0, 11)
+	for i := 0; i <= 10; i++ {
+		label := fmt.Sprintf("%d", i)
+		switch i {
+		case 0:
+			label = "0 — safe / very similar"
+		case 5:
+			label = "5 — balanced (default)"
+		case 10:
+			label = "10 — wild / genre-crossing"
+		}
+		exploreOpts = append(exploreOpts, huh.NewOption(label, i))
+	}
+
+	countryOpts := []huh.Option[string]{huh.NewOption("(off)", "")}
+	inList := false
+	for _, c := range chartCountries {
+		countryOpts = append(countryOpts, huh.NewOption(c, c))
+		if strings.EqualFold(c, cfg.Charts.Country) {
+			inList = true
+		}
+	}
+	if cfg.Charts.Country != "" && !inList { // preserve a hand-set value
+		countryOpts = append(countryOpts, huh.NewOption(cfg.Charts.Country+" (current)", cfg.Charts.Country))
+	}
+
 	form := huh.NewForm(
 		huh.NewGroup(
-			huh.NewNote().
-				Title("pixeltui setup").
-				Description("Tab/↑↓ move · Enter advances · Esc cancels.\n"),
+			huh.NewNote().Title("pixeltui setup").Description("Tab/↑↓ move · Enter advances · Esc cancels.\n"),
 			huh.NewInput().
 				Title("Last.fm API key").
 				Description("Recommendations (free: last.fm/api/account/create)").
-				Placeholder("optional").
-				Value(&cfg.LastfmKey),
-			huh.NewSelect[string]().
-				Title("Theme").
-				Options(huh.NewOptions(tui.ThemeNames()...)...).
-				Value(&cfg.Theme),
+				Placeholder("optional · 32-char key").
+				Value(&cfg.LastfmKey).
+				Validate(validateLastfmKey),
+			huh.NewSelect[string]().Title("Theme").Options(huh.NewOptions(tui.ThemeNames()...)...).Value(&cfg.Theme),
+		),
+		huh.NewGroup(
+			huh.NewNote().Title("Playback").Description("How recommendations and autoplay behave.\n"),
+			huh.NewSelect[int]().
+				Title("Discovery level").
+				Description("How far autoplay/recommendations roam from a seed").
+				Options(exploreOpts...).
+				Value(&cfg.Explore),
+			huh.NewConfirm().Title("Autoplay similar tracks when the queue runs out?").Value(&cfg.Autoplay),
 		),
 		huh.NewGroup(
 			huh.NewNote().Title("Subsonic / Navidrome").Description("Optional self-hosted source.\n"),
@@ -570,7 +636,8 @@ func cmdSetup(_ []string) {
 			huh.NewInput().
 				Title("Local music folders").
 				Description("Comma-separated paths (optional)").
-				Value(&localCSV),
+				Value(&localCSV).
+				Validate(validateLocalDirs),
 			huh.NewInput().
 				Title("Download folder").
 				Description("Artist/Album layout for Navidrome (optional)").
@@ -579,19 +646,12 @@ func cmdSetup(_ []string) {
 		huh.NewGroup(
 			huh.NewNote().Title("Charts").Description("Live YouTube Music Top charts (no API key needed).\n"),
 			huh.NewConfirm().Title("Show the Global Top chart?").Value(&cfg.Charts.Global),
-			huh.NewInput().
-				Title("Country chart").
-				Description("Country name or 2-letter code, e.g. United States / GB (blank = off)").
-				Value(&cfg.Charts.Country),
+			huh.NewSelect[string]().Title("Country chart").Options(countryOpts...).Value(&cfg.Charts.Country),
 		),
 	)
 
 	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			fmt.Println("Setup cancelled — nothing saved.")
-			return
-		}
-		fatalf("setup: %v", err)
+		return err
 	}
 
 	cfg.LocalDirs = nil
@@ -600,12 +660,85 @@ func cmdSetup(_ []string) {
 			cfg.LocalDirs = append(cfg.LocalDirs, d)
 		}
 	}
-
 	if err := cfg.Save(dir); err != nil {
-		fatalf("save config: %v", err)
+		return fmt.Errorf("save config: %w", err)
 	}
+
 	fmt.Printf("\n  Saved → %s\n", config.Path(dir))
-	fmt.Println("  Next: 'pixeltui doctor' to verify, or just 'pixeltui' to start.")
+	checkConnections(cfg)
+	fmt.Println("  Next: 'pixeltui doctor' to verify mpv/yt-dlp, or just 'pixeltui' to start.")
+	return nil
+}
+
+// validateLastfmKey accepts an empty key or a 32-char hex string.
+func validateLastfmKey(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if len(s) != 32 {
+		return fmt.Errorf("Last.fm keys are 32 characters (got %d)", len(s))
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return fmt.Errorf("Last.fm keys are hex (0-9, a-f)")
+		}
+	}
+	return nil
+}
+
+// validateLocalDirs ensures each comma-separated path is an existing folder.
+func validateLocalDirs(s string) error {
+	for _, d := range strings.Split(s, ",") {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		if strings.HasPrefix(d, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				d = filepath.Join(home, d[2:])
+			}
+		}
+		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+			return fmt.Errorf("not a folder: %s", d)
+		}
+	}
+	return nil
+}
+
+// checkConnections does a quick live test of the Last.fm key and Subsonic creds.
+func checkConnections(cfg *config.Config) {
+	if cfg.LastfmKey != "" {
+		fmt.Print("  Last.fm key … ")
+		if _, err := lastfm.NewClient(cfg.LastfmKey).GetSimilarArtists("Radiohead", 1); err != nil {
+			fmt.Printf("✗ %s\n", err)
+		} else {
+			fmt.Println("✓ ok")
+		}
+	}
+	if cfg.HasSubsonic() {
+		fmt.Print("  Subsonic … ")
+		if err := subsonic.NewClient(cfg.Subsonic.URL, cfg.Subsonic.User, cfg.Subsonic.Pass).Ping(); err != nil {
+			fmt.Printf("✗ %s\n", err)
+		} else {
+			fmt.Println("✓ ok")
+		}
+	}
+}
+
+// maybeOnboard runs a friendly first-launch setup when there's no config yet.
+func maybeOnboard(dir string) {
+	yes := true
+	welcome := huh.NewForm(huh.NewGroup(
+		huh.NewNote().
+			Title("Welcome to pixeltui ♫").
+			Description("A fast terminal music player.\nLet's set it up — Last.fm key (optional), sources, theme.\n"),
+		huh.NewConfirm().Title("Configure now?").Affirmative("Set up").Negative("Skip").Value(&yes),
+	))
+	if err := welcome.Run(); err != nil || !yes {
+		return // skipped or aborted — fall through to the player
+	}
+	_ = runSetup(dir)
 }
 
 // ── reset ─────────────────────────────────────────────────────────────────────

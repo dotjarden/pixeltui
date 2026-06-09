@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/sahilm/fuzzy"
 
+	"github.com/dotjarden/pixeltui/tui/config"
 	"github.com/dotjarden/pixeltui/tui/download"
 	"github.com/dotjarden/pixeltui/tui/engine"
 	"github.com/dotjarden/pixeltui/tui/library"
@@ -277,6 +278,7 @@ type keyMap struct {
 	Filter              key.Binding
 	Actions             key.Binding
 	Station, StationNow key.Binding // o = station from selection · O = from now-playing
+	Settings            key.Binding // , = settings overlay
 	Help                key.Binding
 	Quit, Esc           key.Binding
 }
@@ -319,6 +321,7 @@ func newKeyMap() keyMap {
 		Actions:    key.NewBinding(key.WithKeys("."), key.WithHelp(".", "actions")),
 		Station:    key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "station")),
 		StationNow: key.NewBinding(key.WithKeys("O"), key.WithHelp("O", "station playing")),
+		Settings:   key.NewBinding(key.WithKeys(","), key.WithHelp(",", "settings")),
 		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "all keys")),
 		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Esc:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
@@ -373,6 +376,7 @@ type Config struct {
 	DataDir       string           // ~/.pixeltui (for caches like the local index)
 	ChartsGlobal  bool             // show the worldwide Top chart
 	ChartsCountry string           // country (name or 2-letter code) chart ("" = off)
+	Explore       int              // discovery level 0..10 (default 5)
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -408,16 +412,20 @@ type model struct {
 	sleepAt time.Time // zero = no sleep timer; else stop playback at this time
 
 	// overlays
-	showLyrics   bool
-	lyricsVP     viewport.Model
-	lyricsBusy   bool
-	lyricsTrack  string                  // header shown above the lyrics
-	lyricsSynced []lyrics.Line           // timestamped lines (karaoke view); nil → plain
-	lyricsCache  map[string]lyricsResult // trackKey → fetched lyrics (prefetch/reopen)
-	posAt        time.Time               // wall-clock when m.position was last set (interpolation)
-	showHelp     bool                    // full shortcuts page
-	showStats    bool                    // listening stats page
-	stats        statResult              // computed when the stats page opens
+	showLyrics     bool
+	lyricsVP       viewport.Model
+	lyricsBusy     bool
+	lyricsTrack    string                  // header shown above the lyrics
+	lyricsSynced   []lyrics.Line           // timestamped lines (karaoke view); nil → plain
+	lyricsCache    map[string]lyricsResult // trackKey → fetched lyrics (prefetch/reopen)
+	posAt          time.Time               // wall-clock when m.position was last set (interpolation)
+	showHelp       bool                    // full shortcuts page
+	showStats      bool                    // listening stats page
+	stats          statResult              // computed when the stats page opens
+	showSettings   bool                    // in-app settings overlay
+	settingsCursor int                     // selected settings row
+	themeName      string                  // current accent theme (live-editable)
+	explore        int                     // discovery level 0..10 (live-editable)
 
 	// browse menu (unified source picker)
 	showBrowse   bool
@@ -545,6 +553,11 @@ func newModel(cfg Config) model {
 		charts:        ytmCharts{}, // current charts via YouTube Music (no key)
 		chartsGlobal:  cfg.ChartsGlobal,
 		chartsCountry: cfg.ChartsCountry,
+		themeName:     cfg.Theme,
+		explore:       cfg.Explore,
+	}
+	if m.themeName == "" {
+		m.themeName = "default"
 	}
 
 	// Restore the previous session's queue (Up Next) so it survives restarts.
@@ -1443,6 +1456,11 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Settings overlay captures input (navigate + change values live).
+	if m.showSettings {
+		return m.updateSettings(msg)
+	}
+
 	// Browse menu captures input: navigate, enter opens, b/esc closes.
 	if m.showBrowse {
 		// Live fuzzy filter while typing (started with "/").
@@ -1608,6 +1626,11 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, k.Help):
 		m.showHelp = true
+		return m, nil
+
+	case key.Matches(msg, k.Settings):
+		m.showSettings = true
+		m.settingsCursor = 0
 		return m, nil
 
 	case key.Matches(msg, k.Search):
@@ -2594,6 +2617,8 @@ func (m model) View() string {
 		body = m.viewHelpPage()
 	case m.showStats:
 		body = m.viewStats()
+	case m.showSettings:
+		body = m.viewSettings()
 	case m.showBrowse:
 		body = m.viewBrowse()
 	case m.showActions:
@@ -2714,6 +2739,128 @@ func (m model) viewStats() string {
 	return paneStyle(true).Width(m.width - 2).Height(contentH - 2).Render(body)
 }
 
+// ── settings overlay ─────────────────────────────────────────────────────────
+
+const settingsRows = 5
+
+// updateSettings handles input while the settings overlay is open. Changes apply
+// live; closing (, or esc) persists them to config.json.
+func (m model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Settings), key.Matches(msg, m.keys.Esc):
+		m.showSettings = false
+		m.saveSettings()
+		m.status, m.isErr = "Settings saved", false
+		return m, nil
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+	}
+	switch msg.String() {
+	case "up", "ctrl+p":
+		if m.settingsCursor > 0 {
+			m.settingsCursor--
+		}
+	case "down", "ctrl+n":
+		if m.settingsCursor < settingsRows-1 {
+			m.settingsCursor++
+		}
+	case "right", "l", "enter", " ":
+		m.changeSetting(m.settingsCursor, +1)
+	case "left", "h":
+		m.changeSetting(m.settingsCursor, -1)
+	}
+	return m, nil
+}
+
+// changeSetting adjusts the row under the cursor by dir (+1/-1), applying live.
+func (m *model) changeSetting(row, dir int) {
+	switch row {
+	case 0: // theme — recolors the whole UI immediately
+		names := ThemeNames()
+		i := (idxOf(names, m.themeName) + dir + len(names)) % len(names)
+		m.themeName = names[i]
+		applyTheme(m.themeName)
+	case 1: // discovery level
+		m.explore = clampInt(m.explore+dir, 0, 10)
+		if m.rec != nil {
+			m.rec.Weights = engine.ExploreWeights(m.explore)
+		}
+	case 2: // autoplay
+		m.autoQueue = !m.autoQueue
+	case 3: // global chart
+		m.chartsGlobal = !m.chartsGlobal
+	case 4: // country chart
+		i := idxOf(chartCountryList, m.chartsCountry)
+		if i < 0 {
+			i = 0
+		}
+		i = (i + dir + len(chartCountryList)) % len(chartCountryList)
+		m.chartsCountry = chartCountryList[i]
+	}
+}
+
+// saveSettings merges the live settings into config.json (preserving the rest).
+func (m model) saveSettings() {
+	if m.dataDir == "" {
+		return
+	}
+	cfg, err := config.Load(m.dataDir)
+	if err != nil {
+		return
+	}
+	cfg.Theme = m.themeName
+	cfg.Explore = m.explore
+	cfg.Autoplay = m.autoQueue
+	cfg.Charts.Global = m.chartsGlobal
+	cfg.Charts.Country = m.chartsCountry
+	_ = cfg.Save(m.dataDir)
+}
+
+func idxOf(ss []string, s string) int {
+	for i, v := range ss {
+		if v == s {
+			return i
+		}
+	}
+	return -1
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+func (m model) viewSettings() string {
+	contentH := m.height - nowBarH - footerH
+	if contentH < 4 {
+		contentH = 4
+	}
+	row := func(i int, label, val string) string {
+		l := fmt.Sprintf("%-16s", label)
+		if i == m.settingsCursor {
+			return stSelBar.Render("▏") + " " + stSelText.Render(l+"  "+val+"  ◂ ▸")
+		}
+		return "  " + stText.Render(l) + "  " + stArtist.Render(val)
+	}
+	country := m.chartsCountry
+	if country == "" {
+		country = "(off)"
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		stTitle.Render("⚙  SETTINGS"), "",
+		row(0, "Theme", m.themeName),
+		row(1, "Discovery level", fmt.Sprintf("%d / 10", m.explore)),
+		row(2, "Autoplay", onOff(m.autoQueue)),
+		row(3, "Global chart", onOff(m.chartsGlobal)),
+		row(4, "Country chart", country),
+		"",
+		stDim.Render("↑↓ move · ◂ ▸ (or ←/→) change · , or esc to save & close"),
+	)
+	return stPaneFocus.Width(m.width-2).Height(contentH-2).Padding(0, 1).Render(body)
+}
+
 // viewHelpPage renders the full keyboard-shortcuts page (toggle with ?).
 func (m model) viewHelpPage() string {
 	contentH := m.height - nowBarH - footerH
@@ -2784,10 +2931,10 @@ func (m model) viewHelpPage() string {
 	})
 	browse := section("BROWSE & MORE   (b)", []row{
 		{"b", "open browse menu"},
+		{",", "settings (theme, etc.)"},
 		{"↵", "open entry"},
 		{"/", "filter entries"},
-		{"del", "delete playlist"},
-		{"p", "rename playlist"},
+		{"del p", "delete / rename playlist"},
 	})
 
 	gap := "    "
