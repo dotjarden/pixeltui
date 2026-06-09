@@ -14,39 +14,37 @@ if [ -z "$ver" ]; then
 	echo "usage: scripts/release.sh vX.Y.Z" >&2
 	exit 1
 fi
-[[ "$ver" == v* ]] || ver="v$ver"
+[[ "$ver" == v* ]] || ver="v${ver}"
 
 if ! [[ "$ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-	echo "error: '$ver' is not a vMAJOR.MINOR.PATCH tag (e.g. v0.2.0 or v0.2.0-rc1)" >&2
+	echo "error: '${ver}' is not a vMAJOR.MINOR.PATCH tag (e.g. v0.2.0 or v0.2.0-rc1)" >&2
 	exit 1
 fi
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
 if [ "$branch" != "main" ]; then
-	echo "error: cut releases from main (currently on '$branch')" >&2
+	echo "error: cut releases from main (currently on '${branch}')" >&2
 	exit 1
 fi
 if ! git diff --quiet || ! git diff --cached --quiet; then
-	echo "error: working tree is dirty — commit or stash first" >&2
+	echo "error: working tree is dirty -- commit or stash first" >&2
 	exit 1
 fi
 if git rev-parse "$ver" >/dev/null 2>&1; then
-	echo "error: tag $ver already exists" >&2
+	echo "error: tag ${ver} already exists" >&2
 	exit 1
 fi
 
-echo "→ sanity build…"
+echo ">> sanity build"
 go build ./...
 
-echo "→ tagging $ver…"
+echo ">> tagging ${ver}"
 git tag -a "$ver" -m "$ver"
 
-echo "→ pushing $ver…"
+echo ">> pushing ${ver}"
 git push origin "$ver"
 
-cat <<EOF
-
-✓ Pushed $ver — GitHub Actions is building and publishing the release.
-  Watch:  gh run watch
-  After:  gh release view $ver
-EOF
+echo ""
+echo "Pushed ${ver} -- GitHub Actions is building and publishing the release."
+echo "  Watch:  gh run watch"
+echo "  After:  gh release view ${ver}"
