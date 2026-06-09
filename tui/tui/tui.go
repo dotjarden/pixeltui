@@ -267,6 +267,7 @@ type keyMap struct {
 	// Track verbs — lowercase = highlighted, Shift = now-playing.
 	Like, LikeNow       key.Binding
 	AddQ, PlayNext      key.Binding
+	QueueAll            key.Binding // e — queue the whole current list
 	Playlist, PlaylistN key.Binding
 	Download, DownloadN key.Binding
 	Dislike, DislikeNow key.Binding
@@ -303,6 +304,7 @@ func newKeyMap() keyMap {
 		LikeNow:    key.NewBinding(key.WithKeys("F"), key.WithHelp("F", "like playing")),
 		AddQ:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add to queue")),
 		PlayNext:   key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "play next")),
+		QueueAll:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "queue all")),
 		Playlist:   key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "add to playlist")),
 		PlaylistN:  key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "playlist playing")),
 		Download:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "download")),
@@ -350,7 +352,7 @@ func (c contextHelp) ShortHelp() []key.Binding {
 	if c.queueFocus {
 		return append(base, k.Next, k.Remove, k.Shuffle, k.Repeat, k.Clr, k.Actions, k.Tab, k.Help, k.Quit)
 	}
-	return append(base, k.Like, k.AddQ, k.Playlist, k.Actions, k.Search, k.Filter, k.Browse, k.Tab, k.Help, k.Quit)
+	return append(base, k.Like, k.AddQ, k.QueueAll, k.Playlist, k.Actions, k.Search, k.Filter, k.Browse, k.Tab, k.Help, k.Quit)
 }
 func (c contextHelp) FullHelp() [][]key.Binding { return c.k.FullHelp() }
 
@@ -1670,6 +1672,8 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.likeCand(m.verbTarget(true))
 	case key.Matches(msg, k.AddQ):
 		return m.addToQueueCand(m.verbTarget(false))
+	case key.Matches(msg, k.QueueAll):
+		return m.queueAll()
 	case key.Matches(msg, k.PlayNext):
 		// Shift+a = play next (insert selection at the front). The pure
 		// "queue the now-playing track" would be a no-op, so Shift means front.
@@ -1809,6 +1813,32 @@ func (m model) addToQueueCand(c engine.Candidate, ok bool) (tea.Model, tea.Cmd) 
 	first := len(m.queue.Items()) == 0
 	m.appendQueue([]engine.Candidate{c})
 	m.status, m.isErr = fmt.Sprintf("Added · queue %d", len(m.queue.Items())), false
+	if first {
+		if h := m.queueHead(); h != nil {
+			return m, m.preload(*h)
+		}
+	}
+	return m, nil
+}
+
+// queueAll appends every track in the current Discover list to Up Next — works
+// for any list (playlist, album, artist, charts, search, For You). Section
+// headers and album-chooser rows are skipped; duplicates/now-playing are deduped.
+func (m model) queueAll() (tea.Model, tea.Cmd) {
+	cands := m.currentResults()
+	if len(cands) == 0 {
+		m.status, m.isErr = "Nothing to queue here", true
+		return m, nil
+	}
+	first := len(m.queue.Items()) == 0
+	before := len(m.queue.Items())
+	m.appendQueue(cands)
+	added := len(m.queue.Items()) - before
+	if added == 0 {
+		m.status, m.isErr = "Already in the queue", false
+		return m, nil
+	}
+	m.status, m.isErr = fmt.Sprintf("Queued %d · queue %d", added, len(m.queue.Items())), false
 	if first {
 		if h := m.queueHead(); h != nil {
 			return m, m.preload(*h)
@@ -2730,7 +2760,8 @@ func (m model) viewHelpPage() string {
 	})
 	track := section("TRACK   (lower=selected · ⇧=playing)", []row{
 		{"f F", "like / unlike ♥"},
-		{"a A", "add to queue / play next"},
+		{"a A", "add selected / play next"},
+		{"e", "queue every track in this list"},
 		{"p P", "add to playlist"},
 		{"d D", "download"},
 		{"x X", "mute artist (X also skips)"},
