@@ -54,6 +54,25 @@ var countryNames = map[string]string{
 	"united arab emirates": "AE", "uae": "AE", "israel": "IL",
 }
 
+// capPerArtist keeps a chart varied for the compact For You section: at most
+// maxPer tracks per artist, returning at most total tracks (order preserved).
+func capPerArtist(cs []engine.Candidate, maxPer, total int) []engine.Candidate {
+	seen := map[string]int{}
+	out := make([]engine.Candidate, 0, total)
+	for _, c := range cs {
+		k := strings.ToLower(strings.TrimSpace(c.Artist))
+		if seen[k] >= maxPer {
+			continue
+		}
+		seen[k]++
+		out = append(out, c)
+		if len(out) >= total {
+			break
+		}
+	}
+	return out
+}
+
 // cmdGlobalChart / cmdGeoChart load a full current chart into Discover (Browse).
 func cmdGlobalChart(f chartFetcher) tea.Cmd {
 	return func() tea.Msg {
@@ -90,18 +109,18 @@ func cmdForYouChart(f chartFetcher, country string, global bool) tea.Cmd {
 			return forYouChartMsg{}
 		}
 		if code := countryCode(country); code != "" {
-			cs, err := f.ChartTracks(code, 12)
+			cs, err := f.ChartTracks(code, 40)
 			if err != nil {
 				return forYouChartMsg{}
 			}
-			return forYouChartMsg{tracks: cs, label: country + " Top"}
+			return forYouChartMsg{tracks: capPerArtist(cs, 2, 12), label: country + " Top"}
 		}
 		if global {
-			cs, err := f.ChartTracks("ZZ", 12)
+			cs, err := f.ChartTracks("ZZ", 40)
 			if err != nil {
 				return forYouChartMsg{}
 			}
-			return forYouChartMsg{tracks: cs, label: "Top Charts"}
+			return forYouChartMsg{tracks: capPerArtist(cs, 2, 12), label: "Top Charts"}
 		}
 		return forYouChartMsg{}
 	}

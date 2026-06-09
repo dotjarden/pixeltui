@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"io"
 	"math/rand"
 	"os"
 	"sort"
@@ -237,98 +236,10 @@ type renderState struct {
 	preloaded  map[string]string
 	likedKeys  map[string]bool // trackKey → liked (for the ♥ marker; fast)
 	dev        bool
+	hideSel    bool // suppress the Discover selection bar (search box is active)
 }
 
-type trackDelegate struct {
-	st      *renderState
-	isQueue bool
-}
-
-func (d trackDelegate) Height() int                         { return 1 }
-func (d trackDelegate) Spacing() int                        { return 0 }
-func (d trackDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
-
-func (d trackDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	if s, ok := item.(sectionItem); ok {
-		fmt.Fprint(w, stTitle.Render(strings.ToUpper(s.label)))
-		return
-	}
-	it, ok := item.(trackItem)
-	if !ok {
-		return
-	}
-	c := it.c
-	width := m.Width()
-	if width < 10 {
-		width = 10
-	}
-
-	focused := d.isQueue == d.st.focusQueue
-	selected := focused && index == m.Index()
-	isNow := d.st.nowKey != "" && trackKey(c) == d.st.nowKey
-
-	marker := " "
-	switch {
-	case isNow && d.st.paused:
-		marker = "⏸"
-	case isNow:
-		marker = "♪"
-	case d.st.likedKeys[trackKey(c)]:
-		marker = "♥"
-	case d.st.preloaded[trackKey(c)] != "":
-		marker = "·"
-	}
-
-	// Number tracks ignoring section-header rows so the count stays sequential.
-	ord := 0
-	for i, x := range m.Items() {
-		if i >= index {
-			break
-		}
-		if _, isTrack := x.(trackItem); isTrack {
-			ord++
-		}
-	}
-	num := fmt.Sprintf("%2d", ord+1)
-
-	// Fixed column budget so rows never wrap:
-	//   lead(1) marker(1) sp num(2) sp track(W)  sp×2 artist(A) sp×2 dur(5)
-	const durW = 5
-	artistW := 18
-	if width < 50 {
-		artistW = 10
-	}
-	trackW := width - artistW - (1 + 1 + 1 + 2 + 1 + 2 + 2 + durW)
-	if trackW < 6 {
-		trackW = 6
-		artistW = maxi(6, width-trackW-15)
-	}
-
-	// Each column is rendered to an exact display width so rows never misalign,
-	// even when titles contain wide or zero-width characters.
-	track := cell(c.Track, trackW)
-	artist := cell(c.Artist, artistW)
-	durStr := ""
-	if c.DurationSec > 0 {
-		durStr = fmtSec(c.DurationSec)
-	}
-
-	// One uniform plain row, identical width in every branch.
-	core := fmt.Sprintf("%s %s %s  %s  %*s", marker, num, track, artist, durW, durStr)
-
-	switch {
-	case selected:
-		fmt.Fprint(w, stSelBar.Render("▏")+stSelText.Render(core))
-	case isNow:
-		fmt.Fprint(w, " "+stGreen.Render(core))
-	default:
-		row := " " + stText.Render(marker) + " " + stDim.Render(num) + " " +
-			stText.Render(track) + "  " +
-			stArtist.Render(artist) + "  " +
-			stDim.Render(fmt.Sprintf("%*s", durW, durStr))
-		fmt.Fprint(w, row)
-	}
-}
+// Row rendering lives in tracklist.go (the custom smooth-scrolling list).
 
 // ── keymap ────────────────────────────────────────────────────────────────────
 
@@ -453,8 +364,8 @@ type Config struct {
 // ── model ─────────────────────────────────────────────────────────────────────
 
 type model struct {
-	results list.Model
-	queue   list.Model
+	results tracklist
+	queue   tracklist
 	search  textinput.Model
 	prog    progress.Model
 	spin    spinner.Model
@@ -491,6 +402,8 @@ type model struct {
 	lyricsCache  map[string]lyricsResult // trackKey → fetched lyrics (prefetch/reopen)
 	posAt        time.Time               // wall-clock when m.position was last set (interpolation)
 	showHelp     bool                    // full shortcuts page
+	showStats    bool                    // listening stats page
+	stats        statResult              // computed when the stats page opens
 
 	// browse menu (unified source picker)
 	showBrowse   bool
@@ -533,6 +446,7 @@ type model struct {
 	// Unified "/" (search+filter) and "'" (filter-only) state.
 	staticList       bool // current view is a fixed list (Liked/playlist) → "/" only filters
 	searchFilterOnly bool // this session only filters (opened via ') — never fetches online
+	searchOnInput    bool // search box is the active element (no result row selected yet)
 
 	// "For You" discover landing (sectioned: local + engine recs + genre chart).
 	forYouSeed      engine.Candidate
@@ -572,15 +486,8 @@ func newModel(cfg Config) model {
 		}
 	}
 
-	mkList := func(items []list.Item, isQueue bool) list.Model {
-		l := list.New(items, trackDelegate{st: st, isQueue: isQueue}, 0, 0)
-		l.SetShowTitle(false)
-		l.SetShowStatusBar(false)
-		l.SetShowHelp(false)
-		l.SetShowPagination(false)
-		l.SetFilteringEnabled(false)
-		l.DisableQuitKeybindings()
-		return l
+	mkList := func(items []list.Item, isQueue bool) tracklist {
+		return newTrackList(items, st, isQueue)
 	}
 
 	ti := textinput.New()
@@ -1011,21 +918,61 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Unified "/" + "'": fetch from the catalog (YouTube/Subsonic) on Enter,
-		// otherwise just keep the live-filtered list.
+		// Enter on the search box (no row picked) escalates to an online catalog
+		// search; on a highlighted result it plays that result.
 		online := !m.searchFilterOnly && !m.staticList &&
 			(m.searchSource == "youtube" || m.searchSource == "subsonic")
-		m.closeSearchInput()
-		if online && val != "" {
+		if m.searchOnInput && online && val != "" {
+			m.closeSearchInput()
+			m.header = "SEARCH · " + val
 			m.loading = true
 			m.status = ""
 			return m, tea.Batch(m.searchCmd(val), m.spin.Tick)
 		}
+		if m.searchOnInput {
+			m.results.Select(0) // no row picked → act on the top match
+		}
+		m.closeSearchInput()
+		if _, ok := m.results.SelectedItem().(trackItem); ok {
+			return m.playSelected()
+		}
 		return m, nil
+	case "down", "ctrl+n", "pgdown":
+		// First ↓ moves from the input into the results (row 1); then scroll.
+		if m.promptMode != "" {
+			return m, nil
+		}
+		if m.searchOnInput {
+			m.searchOnInput = false
+			m.st.hideSel = false
+			m.results.Select(0)
+			m.skipResultSections(tea.KeyMsg{Type: tea.KeyDown})
+			return m, m.armPreload()
+		}
+		var c tea.Cmd
+		m.results, c = m.results.Update(msg)
+		m.skipResultSections(msg)
+		return m, tea.Batch(c, m.armPreload())
+	case "up", "ctrl+p", "pgup":
+		if m.promptMode != "" || m.searchOnInput {
+			return m, nil
+		}
+		if m.results.Index() == 0 { // leaving the first row → back to the input
+			m.searchOnInput = true
+			m.st.hideSel = true
+			return m, nil
+		}
+		var c tea.Cmd
+		m.results, c = m.results.Update(msg)
+		m.skipResultSections(msg)
+		return m, tea.Batch(c, m.armPreload())
 	}
 	var cmd tea.Cmd
 	m.search, cmd = m.search.Update(msg)
 	if m.promptMode == "" {
+		// Editing the query re-activates the input (no row selected).
+		m.searchOnInput = true
+		m.st.hideSel = true
 		m.applyFilter(m.search.Value()) // live fuzzy across the board
 	}
 	return m, cmd
@@ -1057,6 +1004,8 @@ func (m *model) closeSearchInput() {
 	m.searching = false
 	m.promptMode = ""
 	m.searchFilterOnly = false
+	m.searchOnInput = false
+	m.st.hideSel = false
 	m.filterBack = nil
 	m.search.Blur()
 	m.search.Reset()
@@ -1172,7 +1121,10 @@ func (m *model) rebuildForYou() {
 		if len(rows) == 0 {
 			return
 		}
-		items = append(items, sectionItem{label})
+		if len(items) > 0 {
+			items = append(items, sectionItem{""}) // blank spacer between sections
+		}
+		items = append(items, sectionItem{fmt.Sprintf("%s · %d", label, len(rows))})
 		items = append(items, rows...)
 	}
 	add("Your Music", m.fyLocal)
@@ -1283,7 +1235,9 @@ func (m model) openSearch(filterOnly bool) (tea.Model, tea.Cmd) {
 		}
 		m.setSearchPrompt()
 	}
-	m.applyFilter("") // show the full base; narrows live as you type
+	m.applyFilter("")      // show the full base; narrows live as you type
+	m.searchOnInput = true // start on the input; ↓ moves into the results
+	m.st.hideSel = true
 	m.search.Focus()
 	return m, textinput.Blink
 }
@@ -1416,6 +1370,17 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, k.Help), key.Matches(msg, k.Esc):
 			m.showHelp = false
+		case key.Matches(msg, k.Quit):
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
+	// Listening stats page captures input: b / esc closes, q quits.
+	if m.showStats {
+		switch {
+		case key.Matches(msg, k.Browse), key.Matches(msg, k.Esc):
+			m.showStats = false
 		case key.Matches(msg, k.Quit):
 			return m, tea.Quit
 		}
@@ -1932,6 +1897,9 @@ func (m model) openBrowse() (tea.Model, tea.Cmd) {
 	if m.chartsCountry != "" {
 		items = append(items, browseEntry{label: "📍  " + m.chartsCountry + " Top", kind: "chart_geo", id: m.chartsCountry})
 	}
+	if m.lib != nil {
+		items = append(items, browseEntry{label: "📈  Listening Stats", kind: "stats"})
+	}
 	if len(m.localDirs) > 0 {
 		items = append(items, browseEntry{label: "♪  Local files", kind: "local"})
 	}
@@ -2039,6 +2007,11 @@ func (m model) selectBrowse() (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmdForYouChart(m.charts, m.chartsCountry, m.chartsGlobal))
 		}
 		return m, tea.Batch(cmds...)
+	case "stats":
+		m.showBrowse = false
+		m.stats = m.computeStats()
+		m.showStats = true
+		return m, nil
 	case "chart_global":
 		m.results.SetItems(nil)
 		m.header = "GLOBAL TOP"
@@ -2516,6 +2489,8 @@ func (m model) View() string {
 	switch {
 	case m.showHelp:
 		body = m.viewHelpPage()
+	case m.showStats:
+		body = m.viewStats()
 	case m.showBrowse:
 		body = m.viewBrowse()
 	case m.showActions:
@@ -2528,6 +2503,112 @@ func (m model) View() string {
 		body,
 		m.viewFooter(),
 	)
+}
+
+// ── listening stats ─────────────────────────────────────────────────────────
+
+type statResult struct {
+	plays, tracks, artists, totalSec int
+	topArtists, topTracks            []statCount
+}
+
+type statCount struct {
+	label string
+	n     int
+}
+
+// computeStats aggregates the play history into headline counts and top lists.
+func (m model) computeStats() statResult {
+	var r statResult
+	if m.lib == nil {
+		return r
+	}
+	hist, _ := m.lib.History(5000)
+	r.plays = len(hist)
+	artistN, artistName := map[string]int{}, map[string]string{}
+	trackN, trackLabel := map[string]int{}, map[string]string{}
+	for _, c := range hist {
+		r.totalSec += c.DurationSec
+		if a := strings.TrimSpace(c.Artist); a != "" {
+			ak := strings.ToLower(a)
+			artistN[ak]++
+			artistName[ak] = a
+		}
+		if k := trackKey(c); k != "|" {
+			if _, ok := trackLabel[k]; !ok {
+				trackLabel[k] = c.Track + " · " + c.Artist
+			}
+			trackN[k]++
+		}
+	}
+	r.artists, r.tracks = len(artistN), len(trackN)
+	r.topArtists = topCounts(artistN, artistName, 8)
+	r.topTracks = topCounts(trackN, trackLabel, 8)
+	return r
+}
+
+func topCounts(counts map[string]int, labels map[string]string, n int) []statCount {
+	out := make([]statCount, 0, len(counts))
+	for k, c := range counts {
+		out = append(out, statCount{label: labels[k], n: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].n != out[j].n {
+			return out[i].n > out[j].n
+		}
+		return out[i].label < out[j].label
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+// viewStats renders the listening-stats page (opened from Browse).
+func (m model) viewStats() string {
+	contentH := m.height - nowBarH - footerH
+	if contentH < 4 {
+		contentH = 4
+	}
+	s := m.stats
+
+	if s.plays == 0 {
+		body := lipgloss.JoinVertical(lipgloss.Left,
+			stTitle.Render("LISTENING STATS"), "",
+			stDim.Render("  No listening history yet — play something and check back."))
+		return paneStyle(true).Width(m.width - 2).Height(contentH - 2).Render(body)
+	}
+
+	headline := stText.Render(fmt.Sprintf("  %d plays   ·   %d tracks   ·   %d artists",
+		s.plays, s.tracks, s.artists))
+	if s.totalSec > 0 {
+		mins := s.totalSec / 60
+		dur := fmt.Sprintf("%dm", mins)
+		if hrs := mins / 60; hrs > 0 {
+			dur = fmt.Sprintf("%dh %dm", hrs, mins%60)
+		}
+		headline += stDim.Render("   ·   " + dur + " listened")
+	}
+
+	colW := (m.width - 10) / 2
+	if colW < 16 {
+		colW = 16
+	}
+	renderCol := func(title string, items []statCount) string {
+		lines := []string{stTitle.Render(title)}
+		for i, it := range items {
+			lines = append(lines, "  "+stDim.Render(fmt.Sprintf("%2d ", i+1))+
+				stText.Render(truncate(it.label, colW-9))+stDim.Render(fmt.Sprintf(" ×%d", it.n)))
+		}
+		return lipgloss.NewStyle().Width(colW).Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	}
+	cols := lipgloss.JoinHorizontal(lipgloss.Top,
+		renderCol("TOP ARTISTS", s.topArtists), "   ", renderCol("TOP TRACKS", s.topTracks))
+
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		stTitle.Render("LISTENING STATS"), "", headline, "", cols, "",
+		stDim.Render("  b / esc to close"))
+	return paneStyle(true).Width(m.width - 2).Height(contentH - 2).Render(body)
 }
 
 // viewHelpPage renders the full keyboard-shortcuts page (toggle with ?).
@@ -2754,9 +2835,28 @@ func (m model) viewNowBar() string {
 		}
 		transport := prev + "  " + mid + "  " + next
 
-		title := stNowTitle.Render(truncate(m.nowC.Track, inner-14)) +
-			"  " + stArtist.Render("— "+truncate(m.nowC.Artist, inner/3))
-		head := transport + "   " + title
+		// Budget the title to the actual info width (minus art + transport) so a
+		// long track/artist truncates cleanly on one line instead of wrapping.
+		infoW := inner
+		if m.art != nil {
+			infoW -= artCols + 2
+		}
+		const sep = "   "
+		avail := infoW - lipgloss.Width(transport) - len(sep)
+		if avail < 12 {
+			avail = 12
+		}
+		artW := avail / 3
+		if artW > 24 {
+			artW = 24
+		}
+		trackW := avail - artW - 4 // "  — "
+		if trackW < 6 {
+			trackW = 6
+		}
+		title := stNowTitle.Render(truncate(m.nowC.Track, trackW)) +
+			"  " + stArtist.Render("— "+truncate(m.nowC.Artist, artW))
+		head := transport + sep + title
 
 		// Animated seek bar (m.prog.View renders the spring-eased percent).
 		times := fmt.Sprintf("%s / %s",

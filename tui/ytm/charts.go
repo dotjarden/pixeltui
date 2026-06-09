@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -158,7 +159,7 @@ func parseTrackRows(root interface{}, limit int) []engine.Candidate {
 		case map[string]interface{}:
 			if mr, ok := t["musicResponsiveListItemRenderer"].(map[string]interface{}); ok {
 				cols, _ := mr["flexColumns"].([]interface{})
-				title := cleanText(flexText(cols, 0))
+				title := cleanTitle(cleanText(flexText(cols, 0)))
 				artist := cleanText(flexText(cols, 1))
 				if title != "" && artist != "" && !strings.Contains(strings.ToLower(artist), "subscriber") {
 					k := strings.ToLower(title + "|" + artist)
@@ -211,6 +212,25 @@ func flexText(cols []interface{}, i int) string {
 		return ""
 	}
 	return runText(dig(cols[i], "musicResponsiveListItemFlexColumnRenderer", "text", "runs"))
+}
+
+var (
+	// Parenthetical/bracket noise: "(Official Video)", "[Official Audio]",
+	// "(Lyric Video)", "(Visualizer)", "(4K)", "(Explicit)" — but NOT "(feat. …)",
+	// "(Live)", "(Remix)", "(Acoustic)", which carry real meaning.
+	titleNoise   = regexp.MustCompile(`(?i)\s*[\(\[][^()\[\]]*\b(official|lyrics?|visuali[sz]er|audio|video|m/?v|hd|4k|explicit|clean version|colou?rs? show)\b[^()\[\]]*[\)\]]`)
+	pipeSuffix   = regexp.MustCompile(`\s*\|.*$`) // "Song | From The Block 🎙"
+	colorsSuffix = regexp.MustCompile(`(?i)\s*-\s*a colou?rs show.*$`)
+	multiSpace   = regexp.MustCompile(`\s{2,}`)
+)
+
+// cleanTitle strips YouTube video-title noise so chart rows read like songs.
+func cleanTitle(s string) string {
+	s = titleNoise.ReplaceAllString(s, "")
+	s = colorsSuffix.ReplaceAllString(s, "")
+	s = pipeSuffix.ReplaceAllString(s, "")
+	s = multiSpace.ReplaceAllString(s, " ")
+	return strings.TrimSpace(strings.Trim(strings.TrimSpace(s), "-–—|"))
 }
 
 // cleanText strips control and zero-width/bidi/format runes that YouTube titles
