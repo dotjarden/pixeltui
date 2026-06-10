@@ -52,8 +52,9 @@ type Config struct {
 	Library     *library.Store
 	Subsonic    *subsonic.Client
 	LocalDirs   []string
-	StreamCache StreamURLCache // optional: makes YouTube replays resolve instantly
-	Lastfm      *lastfm.Client // optional: artist listener stats on artist pages
+	StreamCache StreamURLCache      // optional: makes YouTube replays resolve instantly
+	Lastfm      *lastfm.Client      // optional: artist listener stats on artist pages
+	Rec         *engine.Recommender // optional: /api/recommend (needs Last.fm key)
 }
 
 type server struct {
@@ -129,6 +130,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/art", s.auth(s.handleArt))
 	mux.HandleFunc("/api/lyrics", s.auth(s.handleLyrics))
 	mux.HandleFunc("/api/charts", s.auth(s.handleCharts))
+	mux.HandleFunc("/api/radio", s.auth(s.handleRadio))
+	mux.HandleFunc("/api/recommend", s.auth(s.handleRecommend))
 	mux.HandleFunc("/api/artist", s.auth(s.handleArtist))
 	mux.HandleFunc("/api/album", s.auth(s.handleAlbum))
 	mux.HandleFunc("/api/devices", s.auth(s.handleDevices))

@@ -1090,6 +1090,31 @@ func cmdServe(args []string) {
 	if cfg.LastfmKey != "" {
 		lfm = lastfm.NewClient(cfg.LastfmKey)
 	}
+	// Recommendation engine for /api/recommend — the TUI's layered data source
+	// (static graph → bbolt cache → live Last.fm) with liked-artist affinity,
+	// so client recs match the TUI's.
+	var rec *engine.Recommender
+	if lfm != nil {
+		h := &store.Hybrid{Live: lfm}
+		if gr, gerr := store.LoadGraph(filepath.Join(dir, "graph.bin")); gerr == nil {
+			h.Graph = gr
+		}
+		if c, ok := streamCache.(*store.Cache); ok {
+			h.Cache = c
+		}
+		rec = engine.New(h, false)
+		if lib != nil {
+			aff := map[string]float64{}
+			for _, c := range lib.Liked() {
+				if c.Artist != "" {
+					aff[strings.ToLower(c.Artist)] = 1.0
+				}
+			}
+			if len(aff) > 0 {
+				rec.Affinity = aff
+			}
+		}
+	}
 	err = server.Run(server.Config{
 		DataDir:     dir,
 		Name:        *name,
@@ -1100,6 +1125,7 @@ func cmdServe(args []string) {
 		LocalDirs:   cfg.LocalDirs,
 		StreamCache: streamCache,
 		Lastfm:      lfm,
+		Rec:         rec,
 	})
 	if err != nil {
 		fatalf("serve: %v", err)
