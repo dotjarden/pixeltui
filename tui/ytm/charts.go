@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/dotjarden/pixeltui/tui/engine"
@@ -58,7 +59,59 @@ func Charts(country string, limit int) ([]engine.Candidate, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("charts: no tracks parsed")
 	}
+	remapToSongs(out)
 	return out, nil
+}
+
+// remapToSongs swaps each chart entry's music-video id (the only chart YouTube
+// exposes without auth is "Top Music Videos") for its album-song counterpart —
+// clean album audio and square cover art instead of the MV cut and a 16:9
+// video thumbnail. Entries keep their original id when no confident song
+// match exists. Lookups run concurrently; callers cache the result.
+func remapToSongs(cands []engine.Candidate) {
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i := range cands {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(c *engine.Candidate) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			song, err := Resolve(c.Artist, c.Track)
+			if err != nil || song.VideoID == "" || !artistsOverlap(c.Artist, song.Artist) {
+				return
+			}
+			c.VideoID = song.VideoID
+			if song.ArtURL != "" {
+				c.ArtURL = song.ArtURL
+			}
+			if song.DurationSec > 0 {
+				c.DurationSec = song.DurationSec
+			}
+			if song.Album != "" {
+				c.Album = song.Album
+			}
+		}(&cands[i])
+	}
+	wg.Wait()
+}
+
+// artistsOverlap guards the remap against covers/karaoke hits: the resolved
+// song's artist must share a name with the chart row's (either direction,
+// case-insensitive, first-listed artist).
+func artistsOverlap(a, b string) bool {
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if i := strings.IndexAny(s, ",&"); i > 0 {
+			s = strings.TrimSpace(s[:i])
+		}
+		return s
+	}
+	na, nb := norm(a), norm(b)
+	if na == "" || nb == "" {
+		return false
+	}
+	return strings.Contains(na, nb) || strings.Contains(nb, na)
 }
 
 func innerContext(gl string) map[string]interface{} {
