@@ -365,23 +365,47 @@ pixeltui serve --url https://pixeltui.example.ts.net   # behind a tunnel
 ```
 
 - **Pairing:** scan the QR (or enter the URL + code) once; the device gets a
-  saved token. Tokens live in `~/.pixeltui/devices.json` (revocable).
+  saved token (hashed at rest in `~/.pixeltui/devices.json`, revocable).
+  Pairing codes are single-use and rotate after repeated bad attempts.
 - **Transport:** REST for actions, Server-Sent Events for live state.
-- **Streaming:** Subsonic and local play directly (range-aware); YouTube is
-  transcoded to AAC on the fly (needs yt-dlp + ffmpeg, which `doctor --fix`
-  installs).
-- **From anywhere:** bring your own tunnel — [Tailscale](https://tailscale.com)
-  is the easy, private option; pass its address with `--url`.
+- **Streaming:** everything is served range-aware — Subsonic and local files
+  directly, YouTube via a natively resolved AAC/m4a CDN URL (instant seek, no
+  transcoding; ffmpeg only as a last-resort fallback).
+- **Shared library:** likes and playlists live in `~/.pixeltui/library` as
+  plain M3U8 — the TUI and every paired client read *and write* the same
+  files, so changes made anywhere show up everywhere.
 
-A native companion app (Flutter) lives in `clients/flutter/` (see its own
-README). It's an optional client — the server is the stable, documented contract
-it builds on, and the terminal player works without it.
+### From anywhere (Tailscale)
+
+The server binds plain HTTP, so don't port-forward it to the open internet —
+put it on a private tunnel. [Tailscale](https://tailscale.com) is the
+zero-config option (free for personal use, WireGuard-encrypted end to end):
+
+1. Install Tailscale on the machine running `pixeltui serve` and sign in
+   (`brew install --cask tailscale` on macOS, or your package manager).
+2. Install the Tailscale app on the phone, sign in to the **same account**,
+   and leave its VPN toggle on.
+3. Find the machine's tailnet name: `tailscale status` (e.g.
+   `mymac.tail1234.ts.net`).
+4. Start the server advertising that address:
+
+   ```sh
+   pixeltui serve --url http://mymac.tail1234.ts.net:8787
+   ```
+
+5. Pair by scanning the QR. The phone now reaches your library from any
+   network — home Wi-Fi, LTE, hotel — as long as Tailscale is connected.
+
+The traffic is HTTP *inside* an encrypted WireGuard tunnel, and only devices
+on your tailnet can reach the port at all. Other tunnels (Cloudflare Tunnel,
+ngrok) also work — pass whatever public URL they give you via `--url` — but
+they expose the endpoint publicly, leaving only the bearer token as the gate,
+so a private mesh like Tailscale is the recommended default.
 
 ## Repository layout
 
 ```
-tui/              the pixeltui Go app (terminal player + `serve`) — go.mod at root
-clients/flutter/  optional Flutter companion app (removable; tui works standalone)
+tui/   the pixeltui Go app (terminal player + `serve`) — go.mod at root
 ```
 
 ## Build from source
