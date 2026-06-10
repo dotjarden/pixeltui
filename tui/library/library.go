@@ -157,8 +157,8 @@ func (s *Store) SavePlaylist(name string, tracks []engine.Candidate) error {
 		// Standard, widely-understood metadata line.
 		fmt.Fprintf(&b, "#EXTINF:%d,%s - %s\n", c.DurationSec, c.Artist, c.Track)
 		// Our extra fields, as an ignored comment for other players.
-		fmt.Fprintf(&b, "#PIXELTUI:videoId=%s;source=%s;art=%s\n",
-			escapeKV(c.VideoID), escapeKV(c.Source), escapeKV(c.ArtURL))
+		fmt.Fprintf(&b, "#PIXELTUI:videoId=%s;source=%s;art=%s;album=%s\n",
+			escapeKV(c.VideoID), escapeKV(c.Source), escapeKV(c.ArtURL), escapeKV(c.Album))
 		// URI line only when we have one; a bare-metadata track (e.g. a liked
 		// recommendation not yet resolved) still round-trips via the lines above.
 		if u := uri(c); u != "" {
@@ -258,6 +258,8 @@ func parsePixeltui(s string, c *engine.Candidate) {
 			c.Source = v
 		case "art":
 			c.ArtURL = v
+		case "album":
+			c.Album = v
 		}
 	}
 }

@@ -226,3 +226,16 @@ func (h *sseHub) remove(ch chan string) {
 	}
 	h.mu.Unlock()
 }
+
+// broadcast sends msg to every connected client (drops it for slow ones —
+// SSE here is a hint to refresh, not a reliable stream).
+func (h *sseHub) broadcast(msg string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.clients {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
