@@ -32,14 +32,20 @@ func IsAudio(path string) bool {
 	return audioExts[strings.ToLower(filepath.Ext(path))]
 }
 
+// indexVersion invalidates cached entries when the extracted fields change
+// (v2 added Album and durations for untagged files).
+const indexVersion = 2
+
 // idxEntry is one cached file record (keyed by absolute path) persisted to
 // <dataDir>/local-index.json so re-scans can skip ffprobe for unchanged files.
 type idxEntry struct {
 	Path   string `json:"path"`
 	Artist string `json:"artist"`
 	Title  string `json:"title"`
+	Album  string `json:"album,omitempty"`
 	Dur    int    `json:"dur"`
 	Mtime  int64  `json:"mtime"`
+	V      int    `json:"v,omitempty"`
 }
 
 func indexPath(dataDir string) string { return filepath.Join(dataDir, "local-index.json") }
@@ -88,7 +94,7 @@ func entriesToCandidates(list []idxEntry) []engine.Candidate {
 	out := make([]engine.Candidate, len(list))
 	for i, e := range list {
 		out[i] = engine.Candidate{
-			Track: e.Title, Artist: e.Artist, DurationSec: e.Dur,
+			Track: e.Title, Artist: e.Artist, Album: e.Album, DurationSec: e.Dur,
 			Source: Source, StreamURL: e.Path, // player opens the path directly
 		}
 	}
@@ -132,12 +138,13 @@ func Scan(dataDir string, dirs []string) ([]engine.Candidate, error) {
 			if info, ierr := d.Info(); ierr == nil {
 				mt = info.ModTime().Unix()
 			}
-			if e, ok := old[abs]; ok && e.Mtime == mt {
+			if e, ok := old[abs]; ok && e.Mtime == mt && e.V == indexVersion {
 				next[abs] = e // unchanged → reuse cached metadata (no ffprobe)
 				return nil
 			}
-			artist, title, dur := metadata(abs)
-			next[abs] = idxEntry{Path: abs, Artist: artist, Title: title, Dur: dur, Mtime: mt}
+			artist, title, album, dur := metadata(abs)
+			next[abs] = idxEntry{Path: abs, Artist: artist, Title: title, Album: album,
+				Dur: dur, Mtime: mt, V: indexVersion}
 			return nil
 		})
 	}
@@ -145,15 +152,16 @@ func Scan(dataDir string, dirs []string) ([]engine.Candidate, error) {
 	return entriesToCandidates(sortedEntries(next)), nil
 }
 
-// metadata returns (artist, title, durationSec) for a file. It prefers ffprobe
-// and falls back to parsing the filename when ffprobe is unavailable or yields
-// nothing useful.
-func metadata(path string) (artist, title string, dur int) {
-	if a, t, d, ok := probe(path); ok {
-		return a, t, d
+// metadata returns (artist, title, album, durationSec) for a file. It prefers
+// ffprobe tags; an untagged file still keeps its probed duration, with
+// artist/title parsed from the filename.
+func metadata(path string) (artist, title, album string, dur int) {
+	a, t, al, d, ok := probe(path)
+	if ok {
+		return a, t, al, d
 	}
-	a, t := fromFilename(path)
-	return a, t, 0
+	fa, ft := fromFilename(path)
+	return fa, ft, "", d // d survives even when tags don't
 }
 
 // fromFilename derives artist/title from the base name (no extension):
@@ -175,11 +183,12 @@ type ffprobeFormat struct {
 }
 
 // probe runs ffprobe (if on PATH) with a short timeout and parses tags.
-// ok is false when ffprobe is missing, errors, or yields no useful metadata,
-// signaling the caller to fall back to the filename.
-func probe(path string) (artist, title string, dur int, ok bool) {
+// ok is false when no title tag was recovered — the caller then derives
+// artist/title from the filename — but the probed duration is returned
+// regardless so untagged files still show a real length.
+func probe(path string) (artist, title, album string, dur int, ok bool) {
 	if _, err := exec.LookPath("ffprobe"); err != nil {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
@@ -187,25 +196,21 @@ func probe(path string) (artist, title string, dur int, ok bool) {
 		"-v", "quiet", "-print_format", "json", "-show_format", path)
 	data, err := cmd.Output()
 	if err != nil {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	var f ffprobeFormat
 	if json.Unmarshal(data, &f) != nil {
-		return "", "", 0, false
+		return "", "", "", 0, false
 	}
 	title = firstTag(f.Format.Tags, "title", "TITLE")
 	artist = firstTag(f.Format.Tags, "artist", "ARTIST", "album_artist", "ALBUM_ARTIST")
+	album = firstTag(f.Format.Tags, "album", "ALBUM")
 	if s := strings.TrimSpace(f.Format.Duration); s != "" {
 		if v, err := strconv.ParseFloat(s, 64); err == nil {
 			dur = int(v)
 		}
 	}
-	// Useful only if we recovered at least a title; otherwise fall back so the
-	// filename can supply a sensible Track (and possibly Artist).
-	if strings.TrimSpace(title) == "" {
-		return "", "", 0, false
-	}
-	return artist, title, dur, true
+	return artist, title, album, dur, strings.TrimSpace(title) != ""
 }
 
 // firstTag returns the first non-empty value among the given tag keys.

@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -17,13 +18,21 @@ import (
 
 // ── device token store ────────────────────────────────────────────────────────
 
+// device is one paired client. Only the SHA-256 of its bearer token is kept,
+// so a leaked devices.json can't be replayed as credentials.
 type device struct {
-	Token   string    `json:"token"`
-	Name    string    `json:"name"`
-	Created time.Time `json:"created"`
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	TokenSHA string    `json:"token_sha256"`
+	Created  time.Time `json:"created"`
+	LastSeen time.Time `json:"last_seen"`
+
+	// Token is the legacy plaintext field from pre-hashing versions; it's
+	// migrated to TokenSHA (and blanked) the first time the store loads.
+	Token string `json:"token,omitempty"`
 }
 
-// deviceStore persists paired-device tokens at <dataDir>/devices.json (0600).
+// deviceStore persists paired-device records at <dataDir>/devices.json (0600).
 type deviceStore struct {
 	mu   sync.Mutex
 	path string
@@ -32,10 +41,34 @@ type deviceStore struct {
 
 func openDeviceStore(dataDir string) *deviceStore {
 	ds := &deviceStore{path: filepath.Join(dataDir, "devices.json")}
-	if b, err := os.ReadFile(ds.path); err == nil {
-		json.Unmarshal(b, &ds.devs) //nolint:errcheck
+	b, err := os.ReadFile(ds.path)
+	if err != nil {
+		return ds
+	}
+	json.Unmarshal(b, &ds.devs) //nolint:errcheck
+
+	// Migrate legacy records: hash plaintext tokens, assign missing ids.
+	changed := false
+	for i := range ds.devs {
+		if ds.devs[i].Token != "" && ds.devs[i].TokenSHA == "" {
+			ds.devs[i].TokenSHA = hashToken(ds.devs[i].Token)
+			ds.devs[i].Token = ""
+			changed = true
+		}
+		if ds.devs[i].ID == "" {
+			ds.devs[i].ID = randHex(4)
+			changed = true
+		}
+	}
+	if changed {
+		ds.save()
 	}
 	return ds
+}
+
+func hashToken(tok string) string {
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:])
 }
 
 func (ds *deviceStore) save() {
@@ -49,29 +82,81 @@ func (ds *deviceStore) save() {
 	}
 }
 
-// valid reports whether token belongs to a paired device (constant-time).
-func (ds *deviceStore) valid(token string) bool {
+// valid checks a presented token against the stored hashes (constant-time)
+// and returns the matching device id. It refreshes the device's last-seen
+// stamp at minute granularity.
+func (ds *deviceStore) valid(token string) (string, bool) {
 	if token == "" {
-		return false
+		return "", false
 	}
+	h := hashToken(token)
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
-	for _, d := range ds.devs {
-		if subtle.ConstantTimeCompare([]byte(d.Token), []byte(token)) == 1 {
+	for i := range ds.devs {
+		if subtle.ConstantTimeCompare([]byte(ds.devs[i].TokenSHA), []byte(h)) == 1 {
+			if time.Since(ds.devs[i].LastSeen) > time.Minute {
+				ds.devs[i].LastSeen = time.Now()
+				ds.save()
+			}
+			return ds.devs[i].ID, true
+		}
+	}
+	return "", false
+}
+
+// add issues a new device token. The plaintext token is returned exactly once
+// (to the pairing client); only its hash is persisted.
+func (ds *deviceStore) add(name string) (token, id string) {
+	token = randHex(32)
+	id = randHex(4)
+	ds.mu.Lock()
+	ds.devs = append(ds.devs, device{
+		ID:       id,
+		Name:     name,
+		TokenSHA: hashToken(token),
+		Created:  time.Now(),
+		LastSeen: time.Now(),
+	})
+	ds.save()
+	ds.mu.Unlock()
+	return token, id
+}
+
+// revoke removes a paired device; its token stops working immediately.
+func (ds *deviceStore) revoke(id string) bool {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	for i := range ds.devs {
+		if ds.devs[i].ID == id {
+			ds.devs = append(ds.devs[:i], ds.devs[i+1:]...)
+			ds.save()
 			return true
 		}
 	}
 	return false
 }
 
-// add issues and persists a new device token.
-func (ds *deviceStore) add(name string) string {
-	tok := randHex(32)
+// deviceInfo is the client-safe listing entry (no token material).
+type deviceInfo struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Created  time.Time `json:"created"`
+	LastSeen time.Time `json:"last_seen"`
+	Current  bool      `json:"current"`
+}
+
+// list returns client-safe device records; current marks the caller's own.
+func (ds *deviceStore) list(currentID string) []deviceInfo {
 	ds.mu.Lock()
-	ds.devs = append(ds.devs, device{Token: tok, Name: name, Created: time.Now()})
-	ds.save()
-	ds.mu.Unlock()
-	return tok
+	defer ds.mu.Unlock()
+	out := make([]deviceInfo, 0, len(ds.devs))
+	for _, d := range ds.devs {
+		out = append(out, deviceInfo{
+			ID: d.ID, Name: d.Name, Created: d.Created,
+			LastSeen: d.LastSeen, Current: d.ID == currentID,
+		})
+	}
+	return out
 }
 
 func randHex(n int) string {

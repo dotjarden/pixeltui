@@ -97,6 +97,8 @@ func albumCards(car interface{}, artist string) []Album {
 					Artist:   artist,
 					Year:     yearFromRuns(dig(tr, "subtitle", "runs")),
 					BrowseID: id,
+					ArtURL: thumbsBest(dig(tr, "thumbnailRenderer",
+						"musicThumbnailRenderer", "thumbnail", "thumbnails")),
 				})
 				return
 			}

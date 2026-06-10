@@ -1079,14 +1079,27 @@ func cmdServe(args []string) {
 	if cfg.HasSubsonic() {
 		sub = subsonic.NewClient(cfg.Subsonic.URL, cfg.Subsonic.User, cfg.Subsonic.Pass)
 	}
+	// Stream-URL cache: makes repeat YouTube plays resolve instantly. Optional —
+	// if the TUI holds the bbolt lock, serve just runs uncached.
+	var streamCache server.StreamURLCache
+	if c, err := store.OpenCache(filepath.Join(dir, "cache.db")); err == nil {
+		streamCache = c
+		defer c.Close()
+	}
+	var lfm *lastfm.Client
+	if cfg.LastfmKey != "" {
+		lfm = lastfm.NewClient(cfg.LastfmKey)
+	}
 	err = server.Run(server.Config{
-		DataDir:   dir,
-		Name:      *name,
-		Addr:      *addr,
-		URL:       *urlFlag,
-		Library:   lib,
-		Subsonic:  sub,
-		LocalDirs: cfg.LocalDirs,
+		DataDir:     dir,
+		Name:        *name,
+		Addr:        *addr,
+		URL:         *urlFlag,
+		Library:     lib,
+		Subsonic:    sub,
+		LocalDirs:   cfg.LocalDirs,
+		StreamCache: streamCache,
+		Lastfm:      lfm,
 	})
 	if err != nil {
 		fatalf("serve: %v", err)

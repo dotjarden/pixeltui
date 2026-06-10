@@ -9,9 +9,9 @@ import (
 )
 
 // ArtistHit and Album are lightweight entity results for typed ("bang") searches.
-type ArtistHit struct{ Name, BrowseID string }
+type ArtistHit struct{ Name, BrowseID, ArtURL string }
 
-type Album struct{ Title, Artist, Year, BrowseID string }
+type Album struct{ Title, Artist, Year, BrowseID, ArtURL string }
 
 // SearchArtists returns artist entities matching the query (most-relevant first).
 func SearchArtists(query string, limit int) ([]ArtistHit, error) {
@@ -24,7 +24,11 @@ func SearchArtists(query string, limit int) ([]ArtistHit, error) {
 		if a.BrowseID == "" || a.Artist == "" {
 			continue
 		}
-		out = append(out, ArtistHit{Name: cleanText(a.Artist), BrowseID: a.BrowseID})
+		out = append(out, ArtistHit{
+			Name:     cleanText(a.Artist),
+			BrowseID: a.BrowseID,
+			ArtURL:   bestThumb(a.Thumbnails),
+		})
 		if len(out) >= limit {
 			break
 		}
@@ -48,6 +52,7 @@ func SearchAlbums(query string, limit int) ([]Album, error) {
 			Artist:   joinArtists(a.Artists),
 			Year:     a.Year,
 			BrowseID: a.BrowseID,
+			ArtURL:   bestThumb(a.Thumbnails),
 		})
 		if len(out) >= limit {
 			break

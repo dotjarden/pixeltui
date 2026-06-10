@@ -12,6 +12,7 @@ require (
 	github.com/sahilm/fuzzy v0.1.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.etcd.io/bbolt v1.4.3
+	golang.org/x/sync v0.15.0
 )
 
 require (

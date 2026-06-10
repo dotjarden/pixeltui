@@ -5,45 +5,76 @@
 // Transport: plain REST for actions + Server-Sent Events for live state (no
 // WebSocket dependency). Auth: per-device bearer tokens, paired once via a QR
 // the command prints. Streaming: Subsonic/local are proxied/served directly
-// (range-aware); YouTube transcoding lands in a later phase.
+// (range-aware); YouTube resolves to a pre-signed m4a CDN URL (innertube.go)
+// and is proxied the same way.
 package server
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/lastfm"
 	"github.com/dotjarden/pixeltui/tui/library"
 	"github.com/dotjarden/pixeltui/tui/local"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
 	"github.com/dotjarden/pixeltui/tui/ytm"
 )
 
+// StreamURLCache caches resolved CDN URLs (implemented by *store.Cache).
+type StreamURLCache interface {
+	GetStreamURL(key string) (string, bool)
+	PutStreamURL(key, url string, expire int64)
+}
+
 // Config holds the server's dependencies and bind settings.
 type Config struct {
-	DataDir   string
-	Name      string // shown to clients (defaults to hostname)
-	Addr      string // bind address, e.g. ":8787"
-	URL       string // public base URL for the pairing QR (override for tunnels)
-	Library   *library.Store
-	Subsonic  *subsonic.Client
-	LocalDirs []string
+	DataDir     string
+	Name        string // shown to clients (defaults to hostname)
+	Addr        string // bind address, e.g. ":8787"
+	URL         string // public base URL for the pairing QR (override for tunnels)
+	Library     *library.Store
+	Subsonic    *subsonic.Client
+	LocalDirs   []string
+	StreamCache StreamURLCache // optional: makes YouTube replays resolve instantly
+	Lastfm      *lastfm.Client // optional: artist listener stats on artist pages
 }
 
 type server struct {
 	cfg     Config
 	devices *deviceStore
-	code    string // session pairing code
 	sse     *sseHub
+
+	// Pairing codes are single-use: rotated after every successful pair and
+	// after maxPairFails bad attempts (with a growing per-attempt delay), so
+	// the 6-char code can't be brute-forced or reused.
+	pairMu    sync.Mutex
+	code      string // current pairing code
+	pairFails int    // consecutive bad attempts against the current code
+
+	// Collapses concurrent stream-URL resolutions for the same track (AVPlayer
+	// opens several range requests at once) onto a single resolve.
+	resolveGroup singleflight.Group
 }
+
+// maxPairFails rotates the pairing code after this many consecutive bad codes.
+const maxPairFails = 5
 
 // Run starts the HTTP server (blocking). It prints pairing instructions + a QR.
 func Run(cfg Config) error {
@@ -80,6 +111,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/pair", s.handlePair)
 	mux.HandleFunc("/api/sources", s.auth(s.handleSources))
 	mux.HandleFunc("/api/search", s.auth(s.handleSearch))
+	mux.HandleFunc("/api/search/entities", s.auth(s.handleSearchEntities))
 	mux.HandleFunc("/api/liked", s.auth(s.handleLiked))
 	mux.HandleFunc("/api/playlists", s.auth(s.handlePlaylists))
 	mux.HandleFunc("/api/playlist", s.auth(s.handlePlaylist))
@@ -89,6 +121,12 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/subsonic/playlist", s.auth(s.handleSubPlaylist))
 	mux.HandleFunc("/api/stream", s.auth(s.handleStream))
 	mux.HandleFunc("/api/art", s.auth(s.handleArt))
+	mux.HandleFunc("/api/lyrics", s.auth(s.handleLyrics))
+	mux.HandleFunc("/api/charts", s.auth(s.handleCharts))
+	mux.HandleFunc("/api/artist", s.auth(s.handleArtist))
+	mux.HandleFunc("/api/album", s.auth(s.handleAlbum))
+	mux.HandleFunc("/api/devices", s.auth(s.handleDevices))
+	mux.HandleFunc("/api/devices/revoke", s.auth(s.handleRevoke))
 	mux.HandleFunc("/events", s.auth(s.handleEvents))
 	return withCORS(mux)
 }
@@ -111,6 +149,17 @@ func withCORS(h http.Handler) http.Handler {
 
 // ── auth ────────────────────────────────────────────────────────────────────
 
+// deviceIDKey carries the authenticated device's id through the request context.
+type ctxKey int
+
+const deviceIDKey ctxKey = iota
+
+// deviceID returns the authenticated device id for a request ("" if none).
+func deviceID(r *http.Request) string {
+	id, _ := r.Context().Value(deviceIDKey).(string)
+	return id
+}
+
 // auth wraps a handler, requiring a valid device token (Authorization: Bearer
 // <token>, or ?token= for media elements that can't set headers).
 func (s *server) auth(h http.HandlerFunc) http.HandlerFunc {
@@ -119,11 +168,12 @@ func (s *server) auth(h http.HandlerFunc) http.HandlerFunc {
 		if tok == "" {
 			tok = r.URL.Query().Get("token")
 		}
-		if !s.devices.valid(tok) {
+		id, ok := s.devices.valid(tok)
+		if !ok {
 			http.Error(w, "unauthorized — pair this device first", http.StatusUnauthorized)
 			return
 		}
-		h(w, r)
+		h(w, r.WithContext(context.WithValue(r.Context(), deviceIDKey, id)))
 	}
 }
 
@@ -131,7 +181,9 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "name": s.cfg.Name, "service": "pixeltui"})
 }
 
-// handlePair exchanges the session pairing code for a durable device token.
+// handlePair exchanges the current pairing code for a durable device token.
+// Codes are single-use; bad attempts are slowed down and eventually rotate
+// the code entirely.
 func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
 	var body struct{ Code, Name string }
 	if r.Method == http.MethodPost {
@@ -140,16 +192,69 @@ func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
 	if body.Code == "" {
 		body.Code = r.URL.Query().Get("code")
 	}
+
+	s.pairMu.Lock()
 	if !constantEqual(body.Code, s.code) {
+		s.pairFails++
+		delay := time.Duration(s.pairFails) * 300 * time.Millisecond
+		rotated := false
+		if s.pairFails >= maxPairFails {
+			s.code = randCode()
+			s.pairFails = 0
+			rotated = true
+		}
+		s.pairMu.Unlock()
+		time.Sleep(delay) // slow down guessing without holding the lock
+		if rotated {
+			fmt.Println("\n  Too many bad pairing attempts — code rotated.")
+			s.printPairing()
+		}
 		http.Error(w, "bad pairing code", http.StatusForbidden)
 		return
 	}
+	// Success: the code is spent — rotate it for the next device.
+	s.code = randCode()
+	s.pairFails = 0
+	s.pairMu.Unlock()
+
 	name := strings.TrimSpace(body.Name)
 	if name == "" {
 		name = "device"
 	}
-	tok := s.devices.add(name)
-	writeJSON(w, map[string]any{"token": tok, "server": s.cfg.Name})
+	if len(name) > 40 {
+		name = name[:40]
+	}
+	tok, id := s.devices.add(name)
+	fmt.Printf("\n  ✓ Paired %q (device %s) — next code:\n", name, id)
+	s.printPairing()
+	writeJSON(w, map[string]any{"token": tok, "device_id": id, "server": s.cfg.Name})
+}
+
+// handleDevices lists paired devices (no token material).
+func (s *server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"devices": s.devices.list(deviceID(r))})
+}
+
+// handleRevoke unpairs a device by id; its token stops working immediately.
+func (s *server) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct{ ID string }
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.ID == "" {
+		body.ID = r.URL.Query().Get("id")
+	}
+	if body.ID == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	if !s.devices.revoke(body.ID) {
+		http.Error(w, "unknown device", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // ── catalog ─────────────────────────────────────────────────────────────────
@@ -185,7 +290,17 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	case "local":
 		res, err = s.localSearch(q)
 	default:
+		// YouTube search is the slow path (~1s) — short TTL cache makes
+		// repeat/debounced queries instant.
+		key := strings.ToLower(strings.TrimSpace(q))
+		if v, ok := searchCache.get(key); ok {
+			res = v.([]engine.Candidate)
+			break
+		}
 		res, err = ytm.Search(q, 40)
+		if err == nil {
+			searchCache.put(key, res)
+		}
 	}
 	s.writeTracks(w, res, err)
 }
@@ -312,11 +427,59 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleArt(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	kind, val, ok := splitID(id)
-	if !ok || kind != "su" || s.cfg.Subsonic == nil {
+	switch {
+	case ok && kind == "su" && s.cfg.Subsonic != nil:
+		s.proxy(w, r, s.cfg.Subsonic.CoverArtURL(val))
+	case ok && kind == "lo":
+		s.localArt(w, r, val)
+	default:
 		http.Error(w, "bad id", http.StatusBadRequest)
+	}
+}
+
+// localArt serves the embedded cover of a local file, extracting it with
+// ffmpeg on first request and caching it under <dataDir>/artcache. Files with
+// no embedded art get a cached negative marker so we don't re-run ffmpeg.
+func (s *server) localArt(w http.ResponseWriter, r *http.Request, encPath string) {
+	raw, err := base64.URLEncoding.DecodeString(encPath)
+	if err != nil || !s.localAllowed(string(raw)) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	s.proxy(w, r, s.cfg.Subsonic.CoverArtURL(val))
+	path := string(raw)
+
+	dir := filepath.Join(s.cfg.DataDir, "artcache")
+	_ = os.MkdirAll(dir, 0o755)
+	sum := sha256.Sum256(raw)
+	cached := filepath.Join(dir, hex.EncodeToString(sum[:8])+".jpg")
+	negative := cached + ".none"
+
+	if _, err := os.Stat(negative); err == nil {
+		http.Error(w, "no embedded art", http.StatusNotFound)
+		return
+	}
+	if _, err := os.Stat(cached); err != nil {
+		ff, lerr := exec.LookPath("ffmpeg")
+		if lerr != nil {
+			http.Error(w, "ffmpeg not available", http.StatusNotFound)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		tmp := cached + ".tmp.jpg"
+		// -an drops audio; the attached picture stream becomes a JPEG.
+		cmd := exec.CommandContext(ctx, ff, "-hide_banner", "-loglevel", "error",
+			"-i", path, "-an", "-frames:v", "1", "-q:v", "4", "-y", tmp)
+		if cmd.Run() != nil {
+			_ = os.WriteFile(negative, nil, 0o644)
+			os.Remove(tmp) //nolint:errcheck
+			http.Error(w, "no embedded art", http.StatusNotFound)
+			return
+		}
+		_ = os.Rename(tmp, cached)
+	}
+	w.Header().Set("Cache-Control", "max-age=86400")
+	http.ServeFile(w, r, cached)
 }
 
 // localAllowed reports whether path is a real audio file under a configured dir.
@@ -344,6 +507,8 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request, target string) {
 	if rg := r.Header.Get("Range"); rg != "" {
 		req.Header.Set("Range", rg)
 	}
+	// googlevideo rejects requests with no UA; harmless for other upstreams.
+	req.Header.Set("User-Agent", "Mozilla/5.0")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		http.Error(w, "upstream error", http.StatusBadGateway)
@@ -398,6 +563,7 @@ type trackDTO struct {
 	ID       string `json:"id"` // opaque stream id (lo:/su:/yt:)
 	Track    string `json:"track"`
 	Artist   string `json:"artist"`
+	Album    string `json:"album,omitempty"`
 	Duration int    `json:"duration"`
 	Art      string `json:"art,omitempty"`
 	Source   string `json:"source"`
@@ -408,19 +574,13 @@ func (s *server) writeTracks(w http.ResponseWriter, cs []engine.Candidate, err e
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	out := make([]trackDTO, 0, len(cs))
-	for _, c := range cs {
-		if d, ok := toDTO(c); ok {
-			out = append(out, d)
-		}
-	}
-	writeJSON(w, map[string]any{"tracks": out})
+	writeJSON(w, map[string]any{"tracks": toDTOs(cs)})
 }
 
 // toDTO converts a candidate to a client-safe payload, deriving an opaque stream
 // id and never leaking server-side credentials (Subsonic auth URLs).
 func toDTO(c engine.Candidate) (trackDTO, bool) {
-	d := trackDTO{Track: c.Track, Artist: c.Artist, Duration: c.DurationSec, Source: c.Source}
+	d := trackDTO{Track: c.Track, Artist: c.Artist, Album: c.Album, Duration: c.DurationSec, Source: c.Source}
 	switch {
 	case c.Source == "subsonic":
 		if id := queryParam(c.StreamURL, "id"); id != "" {
@@ -433,6 +593,7 @@ func toDTO(c engine.Candidate) (trackDTO, bool) {
 		if c.StreamURL != "" {
 			d.ID = "lo:" + base64.URLEncoding.EncodeToString([]byte(c.StreamURL))
 			d.Source = "local"
+			d.Art = "/api/art?id=" + d.ID // embedded cover, extracted on demand
 		}
 	case c.VideoID != "":
 		d.ID = "yt:" + c.VideoID
