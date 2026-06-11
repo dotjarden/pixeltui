@@ -109,12 +109,15 @@ pixeltui doctor --fix      # install yt-dlp + mpv
 ### Updating
 
 ```sh
-pixeltui update
+pixeltui update            # latest release
+pixeltui update v0.2.4     # a specific tag — also how you roll back
 ```
 
-Downloads the latest release build for your platform, verifies its checksum, and
-replaces the running binary in place. (You can also just re-run the install
-one-liner, or `go install …@latest`.)
+Downloads the release build for your platform, verifies its checksum, and
+replaces the running binary in place. With no argument it tracks the latest
+release; pass a tag (with or without the `v`) to pin or roll back. All
+releases: <https://github.com/dotjarden/pixeltui/releases>. (You can also just
+re-run the install one-liner, or `go install …@latest`.)
 
 ### Uninstall
 
@@ -230,7 +233,8 @@ pixeltui                          open the player (search-first)
 pixeltui [track] [artist]         start seeded from a track
 pixeltui setup                    interactive config wizard
 pixeltui scrobble-auth            authorize Last.fm scrobbling (one-time)
-pixeltui update                   self-update to the latest release
+pixeltui serve [--tunnel …]       companion-app server (see "Companion server")
+pixeltui update [version]         self-update: latest, or a tag like v0.2.4
 pixeltui doctor [--fix]           check setup; --fix auto-installs/repairs deps
 pixeltui reset [target]           wipe data: cache | graph | library | config | all
 pixeltui uninstall [--keep-data]  remove pixeltui, data, and bundled tools
@@ -271,9 +275,15 @@ Run `pixeltui setup`, or edit `~/.pixeltui/config.json`:
   "explore": 5,
   "autoplay": true,
   "seek_step": 10,
-  "charts": { "global": true, "country": "" }
+  "charts": { "global": true, "country": "" },
+  "server": { "addr": ":8787", "name": "", "public_url": "", "tunnel": "" }
 }
 ```
+
+The `server` block sets the defaults for `pixeltui serve` — bind address,
+advertised name, and remote access (`tunnel`: `"tailscale"`, `"cloudflare"`,
+`"ngrok"`, or a fixed `public_url` for a tunnel you run yourself). See
+[Companion server](#companion-server-experimental).
 
 **Current charts** (live YouTube Music top tracks — no API key needed) show in
 **Browse** and on the **For You** landing: `charts.global` (worldwide Top, on by
@@ -290,6 +300,7 @@ Every value can also be set by environment variable (env wins over the file):
 | `PIXELTUI_SUBSONIC_URL` / `_USER` / `_PASS` | Subsonic/Navidrome server |
 | `PIXELTUI_LOCAL_DIRS` | local music folders (PATH-style list) |
 | `PIXELTUI_DOWNLOAD_DIR` | where downloads are saved |
+| `PIXELTUI_SERVE_ADDR` / `_URL` / `_TUNNEL` | `pixeltui serve` bind address / public URL / tunnel |
 | `PIXELTUI_YTDLP` / `PIXELTUI_MPV` | override the yt-dlp / mpv binary path |
 
 The config file is written `0600` since it can hold a password.
@@ -360,8 +371,24 @@ kept even on `reset all`.
 client) can browse, search, and stream from anywhere:
 
 ```sh
-pixeltui serve                 # prints a pairing QR + code
-pixeltui serve --url https://pixeltui.example.ts.net   # behind a tunnel
+pixeltui serve                       # LAN: prints a pairing QR + code
+pixeltui serve --tunnel tailscale    # advertise your tailnet address
+pixeltui serve --tunnel cloudflare   # public trycloudflare.com URL, no account
+pixeltui serve --tunnel ngrok        # public ngrok URL (authtoken required)
+pixeltui serve --url https://music.example.com   # BYO tunnel / reverse proxy
+```
+
+All of these can be saved as defaults in `pixeltui setup` (Companion server
+step) — or in the `server` section of `~/.pixeltui/config.json` — so a plain
+`pixeltui serve` does the right thing:
+
+```jsonc
+"server": {
+  "addr": ":8787",            // bind address
+  "name": "studio-mac",       // name shown on paired devices
+  "tunnel": "tailscale",      // "", "tailscale", "cloudflare", or "ngrok"
+  "public_url": ""            // fixed URL for a tunnel you manage yourself
+}
 ```
 
 - **Pairing:** scan the QR (or enter the URL + code) once; the device gets a
@@ -374,6 +401,28 @@ pixeltui serve --url https://pixeltui.example.ts.net   # behind a tunnel
 - **Shared library:** likes and playlists live in `~/.pixeltui/library` as
   plain M3U8 — the TUI and every paired client read *and write* the same
   files, so changes made anywhere show up everywhere.
+- **Shared history:** clients report plays back (`/api/played`), landing in
+  the same `history.jsonl` the TUI writes — so phone listening feeds Recently
+  Played, listening stats, recommendations, and scrobbling
+  (Last.fm / ListenBrainz) exactly like TUI plays.
+- **Full feature surface:** search (all sources), artist/album pages, charts,
+  radio stations, engine recommendations, synced lyrics, listening stats,
+  likes/playlists, play history — everything the TUI offers, over
+  `/api/*` endpoints guarded by per-device tokens.
+
+### Tunnel options
+
+| Tunnel | URL | Privacy | Needs |
+|---|---|---|---|
+| `tailscale` | `http://<host>.ts.net:8787` | private mesh (WireGuard) — **recommended** | Tailscale on both devices |
+| `cloudflare` | random `*.trycloudflare.com` (HTTPS) | public URL, bearer token is the gate | `cloudflared` binary |
+| `ngrok` | ngrok domain (HTTPS) | public URL, bearer token is the gate | `ngrok` + authtoken |
+| `--url` | whatever you run | up to you | your own tunnel/proxy |
+
+`--tunnel cloudflare` and `--tunnel ngrok` spawn the tunnel as a child
+process, wait for the public URL, bake it into the pairing QR, and tear the
+tunnel down when the server stops. `--tunnel tailscale` starts nothing — it
+just detects your tailnet DNS name and advertises it.
 
 ### From anywhere (Tailscale)
 
@@ -387,10 +436,10 @@ zero-config option (free for personal use, WireGuard-encrypted end to end):
    and leave its VPN toggle on.
 3. Find the machine's tailnet name: `tailscale status` (e.g.
    `mymac.tail1234.ts.net`).
-4. Start the server advertising that address:
+4. Start the server — it detects the tailnet name itself:
 
    ```sh
-   pixeltui serve --url http://mymac.tail1234.ts.net:8787
+   pixeltui serve --tunnel tailscale
    ```
 
 5. Pair by scanning the QR. The phone now reaches your library from any

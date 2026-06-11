@@ -95,6 +95,7 @@ func (s *server) handleLyrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := map[string]any{"synced": []lyricLine{}, "plain": ""}
+	found := false
 	if res, err := lyrics.Fetch(artist, track, "", durSec); err == nil && !res.Empty() {
 		lines := make([]lyricLine, 0, len(res.Synced))
 		for _, l := range res.Synced {
@@ -102,12 +103,19 @@ func (s *server) handleLyrics(w http.ResponseWriter, r *http.Request) {
 		}
 		out["synced"] = lines
 		out["plain"] = res.Plain
+		found = true
 	} else if kind, vid, ok := splitID(q.Get("id")); ok && kind == "yt" {
-		if text, err := ytm.Lyrics(vid); err == nil {
+		if text, err := ytm.Lyrics(vid); err == nil && text != "" {
 			out["plain"] = text
+			found = true
 		}
 	}
-	lyricsCache.put(key, out)
+	// Only cache hits: an empty result may be a transient upstream failure
+	// (LRCLIB blip), and caching it would blank this track's lyrics for the
+	// whole TTL across every client.
+	if found {
+		lyricsCache.put(key, out)
+	}
 	writeJSON(w, out)
 }
 

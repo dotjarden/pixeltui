@@ -34,6 +34,18 @@ type Scrobble struct {
 	ListenBrainzToken string `json:"listenbrainz_token"` // ListenBrainz user token
 }
 
+// Server configures `pixeltui serve` (the companion-app backend) so the
+// command runs flag-free. CLI flags override these per run.
+type Server struct {
+	Addr      string `json:"addr,omitempty"`       // bind address, default ":8787"
+	Name      string `json:"name,omitempty"`       // advertised name, default hostname
+	PublicURL string `json:"public_url,omitempty"` // fixed public base URL (BYO tunnel)
+	// Tunnel auto-publishes the server on start: "cloudflare" (cloudflared
+	// quick tunnel), "ngrok", or "tailscale" (advertise the tailnet DNS name).
+	// Empty = LAN only (or PublicURL if set).
+	Tunnel string `json:"tunnel,omitempty"`
+}
+
 // Config is the persisted application configuration.
 type Config struct {
 	LastfmKey   string   `json:"lastfm_key"`
@@ -46,6 +58,7 @@ type Config struct {
 	Autoplay    bool     `json:"autoplay"`     // default true
 	SeekStep    int      `json:"seek_step"`    // seek step in seconds, default 10
 	Charts      Charts   `json:"charts"`       // optional global/country charts
+	Server      Server   `json:"server"`       // `pixeltui serve` defaults
 }
 
 // Default returns a Config with sensible defaults (Explore=5, Autoplay=true).
@@ -112,6 +125,15 @@ func (c *Config) applyEnv() {
 	}
 	if v, ok := os.LookupEnv("PIXELTUI_THEME"); ok {
 		c.Theme = v
+	}
+	if v, ok := os.LookupEnv("PIXELTUI_SERVE_ADDR"); ok {
+		c.Server.Addr = v
+	}
+	if v, ok := os.LookupEnv("PIXELTUI_SERVE_URL"); ok {
+		c.Server.PublicURL = v
+	}
+	if v, ok := os.LookupEnv("PIXELTUI_SERVE_TUNNEL"); ok {
+		c.Server.Tunnel = v
 	}
 }
 

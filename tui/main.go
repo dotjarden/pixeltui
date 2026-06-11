@@ -14,9 +14,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/huh"
@@ -685,6 +687,30 @@ func runSetup(dir string) error {
 			huh.NewConfirm().Title("Show the Global Top chart?").Value(&cfg.Charts.Global),
 			huh.NewSelect[string]().Title("Country chart").Options(countryOpts...).Value(&cfg.Charts.Country),
 		),
+		huh.NewGroup(
+			huh.NewNote().Title("Companion server").
+				Description("Defaults for `pixeltui serve` — stream your library to the iOS app.\n"),
+			huh.NewSelect[string]().
+				Title("Remote access").
+				Description("How phones reach the server away from home").
+				Options(
+					huh.NewOption("LAN only (no tunnel)", ""),
+					huh.NewOption("Tailscale — private, recommended", "tailscale"),
+					huh.NewOption("Cloudflare quick tunnel — public URL, no account", "cloudflare"),
+					huh.NewOption("ngrok — public URL, needs authtoken", "ngrok"),
+				).
+				Value(&cfg.Server.Tunnel),
+			huh.NewInput().
+				Title("Bind address").
+				Description("Port the server listens on").
+				Placeholder(":8787").
+				Value(&cfg.Server.Addr),
+			huh.NewInput().
+				Title("Fixed public URL").
+				Description("Only for a tunnel you run yourself (overrides the tunnel choice)").
+				Placeholder("optional · https://music.example.com").
+				Value(&cfg.Server.PublicURL),
+		),
 	)
 
 	if err := form.Run(); err != nil {
@@ -1060,20 +1086,65 @@ func cmdExport(args []string) {
 
 // ── serve ─────────────────────────────────────────────────────────────────────
 
-// cmdServe runs the HTTP server that backs the companion app: browse, search,
-// and stream your library (and sources) from anywhere via a BYO tunnel.
-func cmdServe(args []string) {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", ":8787", "bind address")
-	urlFlag := fs.String("url", "", "public base URL advertised in the pairing QR (for tunnels)")
-	name := fs.String("name", "", "server name shown to clients (default: hostname)")
-	fs.Parse(args)
+// flagWasSet reports whether a flag was explicitly passed on the command line.
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
 
+// cmdServe runs the HTTP server that backs the companion app: browse, search,
+// and stream your library (and sources) from anywhere. Remote access comes
+// from --tunnel (cloudflare/ngrok/tailscale) or a BYO tunnel via --url; both
+// can live in the config's "server" section so plain `pixeltui serve` works.
+func cmdServe(args []string) {
 	dir, err := dataDir()
 	if err != nil {
 		fatalf("%v", err)
 	}
 	cfg, _ := config.Load(dir)
+
+	// Config supplies the defaults; flags override per run.
+	defAddr := cfg.Server.Addr
+	if defAddr == "" {
+		defAddr = ":8787"
+	}
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", defAddr, "bind address")
+	urlFlag := fs.String("url", cfg.Server.PublicURL, "public base URL advertised in the pairing QR (BYO tunnel)")
+	name := fs.String("name", cfg.Server.Name, "server name shown to clients (default: hostname)")
+	tunnelFlag := fs.String("tunnel", cfg.Server.Tunnel, "publish via a tunnel: cloudflare, ngrok, or tailscale")
+	fs.Parse(args)
+
+	// An explicit --url wins over a tunnel from config (it IS the tunnel).
+	if *urlFlag != "" && !flagWasSet(fs, "tunnel") {
+		*tunnelFlag = ""
+	}
+	var tun *server.Tunnel
+	if *tunnelFlag != "" {
+		fmt.Printf("  Starting %s tunnel…\n", *tunnelFlag)
+		tun, err = server.StartTunnel(*tunnelFlag, *addr)
+		if err != nil {
+			fatalf("tunnel: %v", err)
+		}
+		if tun != nil {
+			*urlFlag = tun.URL
+			fmt.Printf("  ✓ %s tunnel up: %s\n\n", tun.Provider, tun.URL)
+			defer tun.Close()
+			// Make sure Ctrl-C also tears the tunnel process down.
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			go func() {
+				<-sig
+				tun.Close()
+				os.Exit(0)
+			}()
+		}
+	}
 	lib, _ := library.Open(dir)
 	var sub *subsonic.Client
 	if cfg.HasSubsonic() {
@@ -1089,6 +1160,22 @@ func cmdServe(args []string) {
 	var lfm *lastfm.Client
 	if cfg.LastfmKey != "" {
 		lfm = lastfm.NewClient(cfg.LastfmKey)
+	}
+	// Scrobbling for client plays (POST /api/played): same services and spool
+	// as the TUI, so phone listens reach Last.fm / ListenBrainz too.
+	var scrob *scrobble.Scrobbler
+	if cfg.ScrobbleReady() && cfg.Scrobble.Enabled {
+		var lf *scrobble.Lastfm
+		if cfg.LastfmScrobbleReady() {
+			lf = scrobble.NewLastfm(cfg.LastfmKey, cfg.Scrobble.LastfmSecret, cfg.Scrobble.LastfmSession)
+		}
+		var lb *scrobble.ListenBrainz
+		if cfg.Scrobble.ListenBrainzToken != "" {
+			lb = scrobble.NewListenBrainz(cfg.Scrobble.ListenBrainzToken)
+		}
+		if scrob = scrobble.New(lf, lb, dir); scrob != nil {
+			go scrob.RetrySpool()
+		}
 	}
 	// Recommendation engine for /api/recommend — the TUI's layered data source
 	// (static graph → bbolt cache → live Last.fm) with liked-artist affinity,
@@ -1118,6 +1205,7 @@ func cmdServe(args []string) {
 	err = server.Run(server.Config{
 		DataDir:     dir,
 		Name:        *name,
+		Version:     version,
 		Addr:        *addr,
 		URL:         *urlFlag,
 		Library:     lib,
@@ -1126,6 +1214,7 @@ func cmdServe(args []string) {
 		StreamCache: streamCache,
 		Lastfm:      lfm,
 		Rec:         rec,
+		Scrobbler:   scrob,
 	})
 	if err != nil {
 		fatalf("serve: %v", err)
@@ -1136,9 +1225,11 @@ func cmdServe(args []string) {
 
 const repoSlug = "dotjarden/pixeltui"
 
-// cmdUpdate replaces the running binary with the latest GitHub release build for
-// this OS/arch (same release URL the installer uses).
-func cmdUpdate(_ []string) {
+// cmdUpdate replaces the running binary with a GitHub release build for this
+// OS/arch (same release URLs the installer uses). With no argument it tracks
+// the latest release; `pixeltui update v0.2.4` (or `0.2.4`) installs that tag —
+// also the way to roll back.
+func cmdUpdate(args []string) {
 	exe, err := os.Executable()
 	if err != nil {
 		fatalf("can't locate the running binary: %v", err)
@@ -1151,10 +1242,23 @@ func cmdUpdate(_ []string) {
 	if runtime.GOOS == "windows" {
 		asset = "pixeltui-windows-amd64.exe" // only an amd64 Windows build is published
 	}
-	base := "https://github.com/" + repoSlug + "/releases/latest/download/"
 
-	tag := latestTag() // best-effort, for the message
-	if tag != "" {
+	var wantTag string
+	if len(args) > 0 && args[0] != "" && args[0] != "latest" {
+		wantTag = args[0]
+		if !strings.HasPrefix(wantTag, "v") {
+			wantTag = "v" + wantTag
+		}
+	}
+
+	base := "https://github.com/" + repoSlug + "/releases/latest/download/"
+	if wantTag != "" {
+		base = "https://github.com/" + repoSlug + "/releases/download/" + wantTag + "/"
+		if wantTag == "v"+version {
+			fmt.Printf("Already on %s — reinstalling it anyway.\n", wantTag)
+		}
+		fmt.Printf("Updating pixeltui → %s …\n", wantTag)
+	} else if tag := latestTag(); tag != "" { // best-effort, for the message
 		fmt.Printf("Updating pixeltui → %s …\n", tag)
 	} else {
 		fmt.Println("Updating pixeltui to the latest release …")
@@ -1171,6 +1275,10 @@ func cmdUpdate(_ []string) {
 
 	if err := download(base+asset, tmp); err != nil {
 		tmp.Close()
+		if wantTag != "" && strings.Contains(err.Error(), "404") {
+			fatalf("no release %s (or it lacks %s)\n  releases: https://github.com/%s/releases",
+				wantTag, asset, repoSlug)
+		}
 		fatalf("download failed: %v", err)
 	}
 	tmp.Close()
@@ -1197,8 +1305,8 @@ func cmdUpdate(_ []string) {
 		fatalf("can't install update to %s (try sudo): %v", exe, err)
 	}
 	fmt.Printf("✓ Updated → %s\n", exe)
-	if tag != "" {
-		fmt.Printf("  now on %s\n", tag)
+	if wantTag != "" {
+		fmt.Printf("  now on %s\n", wantTag)
 	}
 }
 
@@ -1820,8 +1928,8 @@ USAGE
   pixeltui [track] [artist]         start seeded from a track
   pixeltui setup                    interactive config (key, scrobbling, Subsonic, folders)
   pixeltui scrobble-auth            authorize Last.fm scrobbling (one-time)
-  pixeltui serve [--addr --url]     run the server for the companion app (pair via QR)
-  pixeltui update                   self-update to the latest release
+  pixeltui serve [--tunnel --addr]  run the companion-app server (pair via QR)
+  pixeltui update [version]         self-update: latest, or a tag like v0.2.4 (rollback)
   pixeltui version                  print the build version
   pixeltui doctor [--fix]           check setup; --fix auto-resolves what it can
   pixeltui reset [cache|graph|library|config|all]   wipe data (keeps tools)
@@ -1830,6 +1938,16 @@ USAGE
   pixeltui build-graph              build the recommendation graph (run once)
   pixeltui cache warm --artist X    pre-fetch an artist for offline use
   pixeltui cache stats | clear      show / wipe the cache
+
+SERVER (companion app)
+  pixeltui serve                    LAN only — prints a pairing QR + code
+  pixeltui serve --tunnel tailscale reachable from anywhere on your tailnet (private)
+  pixeltui serve --tunnel cloudflare  public trycloudflare.com URL, no account
+  pixeltui serve --tunnel ngrok     public ngrok URL (needs an authtoken)
+  pixeltui serve --url https://…    you run the tunnel; pixeltui advertises it
+  Defaults (addr/name/tunnel) live in setup → "Companion server", so a plain
+  serve remembers your choice. Streams YouTube/Subsonic/local, shares
+  likes/playlists/history with the TUI, and scrobbles client plays.
 
 FLAGS
   --key KEY              Last.fm API key (or set LASTFM_API_KEY)

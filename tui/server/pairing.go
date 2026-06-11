@@ -196,8 +196,14 @@ func (s *server) printPairing() {
 	}
 	fmt.Printf("  URL:  %s\n", base)
 	fmt.Printf("  Code: %s\n\n", s.code)
-	fmt.Println("  From anywhere: put this behind a tunnel (e.g. Tailscale) and pass")
-	fmt.Println("  its address with --url.   Ctrl-C to stop.")
+	if s.cfg.URL == "" {
+		fmt.Println("  This address only works on your network. From anywhere:")
+		fmt.Println("    pixeltui serve --tunnel tailscale     private mesh (recommended)")
+		fmt.Println("    pixeltui serve --tunnel cloudflare    public URL, no account needed")
+		fmt.Println("    pixeltui serve --tunnel ngrok         public URL, ngrok account")
+		fmt.Println("  Save a default with `pixeltui setup` (Companion server step).")
+	}
+	fmt.Println("  Ctrl-C to stop.")
 	fmt.Println()
 }
 

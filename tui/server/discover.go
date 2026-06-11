@@ -23,7 +23,8 @@ var (
 
 // handleRadio returns YouTube Music's watch-playlist radio for a track —
 // the seed for stations and autoplay queueing.
-// Query: id (yt:<videoID>), n (default 25).
+// Query: id (yt:<videoID>), n (default 25), exclude (comma-separated artists
+// to mute, same as the TUI's x key).
 func (s *server) handleRadio(w http.ResponseWriter, r *http.Request) {
 	kind, vid, ok := splitID(r.URL.Query().Get("id"))
 	if !ok || kind != "yt" {
@@ -34,7 +35,8 @@ func (s *server) handleRadio(w http.ResponseWriter, r *http.Request) {
 	if n <= 0 || n > 50 {
 		n = 25
 	}
-	key := vid + "|" + strconv.Itoa(n)
+	exclude := r.URL.Query().Get("exclude")
+	key := vid + "|" + strconv.Itoa(n) + "|" + strings.ToLower(exclude)
 	if v, ok := radioCache.get(key); ok {
 		writeJSON(w, v)
 		return
@@ -51,6 +53,7 @@ func (s *server) handleRadio(w http.ResponseWriter, r *http.Request) {
 			out = append(out, c)
 		}
 	}
+	out = filterExcluded(out, exclude)
 	resp := map[string]any{"tracks": toDTOs(out)}
 	radioCache.put(key, resp)
 	writeJSON(w, resp)
@@ -92,7 +95,8 @@ func (s *server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := strings.ToLower(seedsKey(seeds)) + "|" + strconv.Itoa(n)
+	exclude := q.Get("exclude")
+	key := strings.ToLower(seedsKey(seeds)) + "|" + strconv.Itoa(n) + "|" + strings.ToLower(exclude)
 	if v, ok := recsCache.get(key); ok {
 		writeJSON(w, v)
 		return
@@ -103,6 +107,7 @@ func (s *server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	cands = filterExcluded(cands, exclude)
 	resolveToSongs(cands)
 	playable := cands[:0]
 	for _, c := range cands {

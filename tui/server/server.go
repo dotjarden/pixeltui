@@ -33,6 +33,7 @@ import (
 	"github.com/dotjarden/pixeltui/tui/lastfm"
 	"github.com/dotjarden/pixeltui/tui/library"
 	"github.com/dotjarden/pixeltui/tui/local"
+	"github.com/dotjarden/pixeltui/tui/scrobble"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
 	"github.com/dotjarden/pixeltui/tui/ytm"
 )
@@ -47,6 +48,7 @@ type StreamURLCache interface {
 type Config struct {
 	DataDir     string
 	Name        string // shown to clients (defaults to hostname)
+	Version     string // server build version, reported in /health
 	Addr        string // bind address, e.g. ":8787"
 	URL         string // public base URL for the pairing QR (override for tunnels)
 	Library     *library.Store
@@ -55,6 +57,7 @@ type Config struct {
 	StreamCache StreamURLCache      // optional: makes YouTube replays resolve instantly
 	Lastfm      *lastfm.Client      // optional: artist listener stats on artist pages
 	Rec         *engine.Recommender // optional: /api/recommend (needs Last.fm key)
+	Scrobbler   *scrobble.Scrobbler // optional: client plays scrobble like TUI plays
 }
 
 type server struct {
@@ -122,6 +125,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/playlist/delete", s.auth(s.handlePlaylistDelete))
 	mux.HandleFunc("/api/playlist/add", s.auth(s.handlePlaylistAdd))
 	mux.HandleFunc("/api/playlist/remove", s.auth(s.handlePlaylistRemove))
+	mux.HandleFunc("/api/played", s.auth(s.handlePlayed))
+	mux.HandleFunc("/api/nowplaying", s.auth(s.handleNowPlaying))
+	mux.HandleFunc("/api/history", s.auth(s.handleHistory))
+	mux.HandleFunc("/api/stats", s.auth(s.handleStats))
 	mux.HandleFunc("/api/local", s.auth(s.handleLocal))
 	mux.HandleFunc("/api/subsonic/starred", s.auth(s.handleSubStarred))
 	mux.HandleFunc("/api/subsonic/playlists", s.auth(s.handleSubPlaylists))
@@ -187,7 +194,10 @@ func (s *server) auth(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{"ok": true, "name": s.cfg.Name, "service": "pixeltui"})
+	writeJSON(w, map[string]any{
+		"ok": true, "name": s.cfg.Name, "service": "pixeltui",
+		"version": s.cfg.Version,
+	})
 }
 
 // handlePair exchanges the current pairing code for a durable device token.
