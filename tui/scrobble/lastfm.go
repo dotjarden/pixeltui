@@ -156,6 +156,15 @@ func (l *Lastfm) UpdateNowPlaying(artist, track, album string, durationSec int) 
 	return l.call("track.updateNowPlaying", p, nil)
 }
 
+// Love marks a track as loved on the user's Last.fm profile (track.love).
+func (l *Lastfm) Love(artist, track string) error {
+	if l.SessionKey == "" {
+		return fmt.Errorf("last.fm: not authorized")
+	}
+	p := url.Values{"artist": {artist}, "track": {track}, "sk": {l.SessionKey}}
+	return l.call("track.love", p, nil)
+}
+
 // Scrobble submits one play that started at startedAt.
 func (l *Lastfm) Scrobble(artist, track, album string, durationSec int, startedAt time.Time) error {
 	if l.SessionKey == "" {

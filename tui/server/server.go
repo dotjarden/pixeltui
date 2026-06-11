@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -144,6 +145,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/radio", s.auth(s.handleRadio))
 	mux.HandleFunc("/api/recommend", s.auth(s.handleRecommend))
 	mux.HandleFunc("/api/mixes", s.auth(s.handleMixes))
+	mux.HandleFunc("/api/station", s.auth(s.handleStation))
 	mux.HandleFunc("/api/artist", s.auth(s.handleArtist))
 	mux.HandleFunc("/api/album", s.auth(s.handleAlbum))
 	mux.HandleFunc("/api/devices", s.auth(s.handleDevices))
@@ -556,6 +558,79 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request, target string) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body) //nolint:errcheck
+}
+
+// relayChunkSize is how much of the upstream we ask for per ranged request.
+const relayChunkSize = 2 << 20 // 2 MiB
+
+// relayChunked serves one continuous 200 response assembled from sequential
+// ranged upstream requests. googlevideo throttles un-ranged transfers to
+// ~32 KB/s while ranged chunks run at full speed, so a client download that
+// sends no Range header (a single plain GET) would otherwise crawl. The
+// request context rides on every upstream call, so a disconnected client
+// kills the relay.
+func (s *server) relayChunked(w http.ResponseWriter, r *http.Request, target string) {
+	var total, start int64
+	for {
+		end := start + relayChunkSize - 1
+		if total > 0 && end > total-1 {
+			end = total - 1
+		}
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+		if err != nil {
+			http.Error(w, "bad upstream", http.StatusBadGateway)
+			return
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			if start == 0 {
+				http.Error(w, "upstream error", http.StatusBadGateway)
+			}
+			return // mid-relay: stop writing, client sees a short body
+		}
+		if start == 0 {
+			// First chunk: the Content-Range total gives the full size.
+			total = contentRangeTotal(resp.Header.Get("Content-Range"))
+			if v := resp.Header.Get("Content-Type"); v != "" {
+				w.Header().Set("Content-Type", v)
+			}
+			if resp.StatusCode == http.StatusOK || total <= 0 {
+				// Upstream ignored the Range (or no total): pass through as-is.
+				if v := resp.Header.Get("Content-Length"); v != "" {
+					w.Header().Set("Content-Length", v)
+				}
+				w.WriteHeader(resp.StatusCode)
+				io.Copy(w, resp.Body) //nolint:errcheck
+				resp.Body.Close()
+				return
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(total, 10))
+		}
+		_, err = io.Copy(w, resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return
+		}
+		start = end + 1
+		if start >= total {
+			return
+		}
+	}
+}
+
+// contentRangeTotal parses the total size from "bytes 0-99/1234" (0 if unknown).
+func contentRangeTotal(cr string) int64 {
+	i := strings.LastIndexByte(cr, '/')
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.ParseInt(cr[i+1:], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // ── SSE ─────────────────────────────────────────────────────────────────────

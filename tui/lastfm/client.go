@@ -265,6 +265,35 @@ func (c *Client) GetArtistInfo(artist string) (*ArtistInfo, error) {
 	return info, nil
 }
 
+// TagTopArtists returns the most popular artist names for a tag (tag chart).
+func (c *Client) TagTopArtists(tag string, limit int) ([]string, error) {
+	body, err := c.get(url.Values{
+		"method": {"tag.gettopartists"},
+		"tag":    {tag},
+		"limit":  {strconv.Itoa(limit)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		TopArtists struct {
+			Artist []struct {
+				Name string `json:"name"`
+			} `json:"artist"`
+		} `json:"topartists"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(resp.TopArtists.Artist))
+	for _, a := range resp.TopArtists.Artist {
+		if a.Name != "" {
+			names = append(names, a.Name)
+		}
+	}
+	return names, nil
+}
+
 // stripBioLink removes the trailing "<a href…>Read more…</a>" Last.fm appends
 // to bio summaries, leaving plain text.
 func stripBioLink(s string) string {

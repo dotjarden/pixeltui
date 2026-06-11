@@ -130,6 +130,9 @@ func (s *server) handleLike(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if body.Liked {
+		s.cfg.Scrobbler.Love(c) // nil-safe; mirrors the like to Last.fm
+	}
 	s.notifyLibrary("liked")
 	writeJSON(w, map[string]any{"ok": true, "liked": body.Liked})
 }

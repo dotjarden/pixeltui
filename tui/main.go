@@ -93,6 +93,9 @@ func main() {
 		case "serve":
 			cmdServe(os.Args[2:])
 			return
+		case "devices":
+			cmdDevices(os.Args[2:])
+			return
 		case "build-graph":
 			cmdBuildGraph(os.Args[2:])
 			return
@@ -1221,6 +1224,107 @@ func cmdServe(args []string) {
 	}
 }
 
+// ── devices ───────────────────────────────────────────────────────────────────
+
+// pairedDevice mirrors the listing fields of <dataDir>/devices.json (written by
+// the serve command's device store). Tokens are stored hashed and never shown.
+type pairedDevice struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Created  time.Time `json:"created"`
+	LastSeen time.Time `json:"last_seen"`
+}
+
+// cmdDevices lists companion-app devices paired with `pixeltui serve`, or
+// revokes one: `pixeltui devices revoke <id>`.
+func cmdDevices(args []string) {
+	dir, err := dataDir()
+	if err != nil {
+		fatalf("%v", err)
+	}
+	path := filepath.Join(dir, "devices.json")
+
+	if len(args) > 0 && strings.TrimLeft(args[0], "-") == "revoke" {
+		if len(args) < 2 {
+			fatalf("usage: pixeltui devices revoke <id>")
+		}
+		revokeDevice(path, args[1])
+		return
+	}
+
+	var devs []pairedDevice
+	if b, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(b, &devs) //nolint:errcheck
+	}
+	if len(devs) == 0 {
+		fmt.Println("\n  No paired devices. Pair one with 'pixeltui serve' (scan the QR).")
+		fmt.Println()
+		return
+	}
+
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	t := table.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(dimStyle).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			s := lipgloss.NewStyle().Padding(0, 1)
+			if row == table.HeaderRow {
+				return s.Bold(true)
+			}
+			if col >= 2 {
+				return s.Foreground(lipgloss.Color("250"))
+			}
+			return s
+		}).
+		Headers("ID", "NAME", "PAIRED", "LAST SEEN")
+	for _, d := range devs {
+		t.Row(d.ID, d.Name, fmtAge(d.Created)+" ago", fmtAge(d.LastSeen)+" ago")
+	}
+	fmt.Println()
+	fmt.Println(t)
+	fmt.Println("  Revoke with 'pixeltui devices revoke <id>'.")
+	fmt.Println()
+}
+
+// revokeDevice removes one entry from devices.json (atomic rewrite). Records
+// are kept as raw JSON so the stored token hashes survive untouched.
+func revokeDevice(path, id string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		fatalf("no paired devices (%s)", path)
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		fatalf("devices.json: %v", err)
+	}
+	kept := raw[:0]
+	found := false
+	for _, r := range raw {
+		var d pairedDevice
+		if json.Unmarshal(r, &d) == nil && d.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if !found {
+		fatalf("no device with id %q — run 'pixeltui devices' to list them", id)
+	}
+	out, err := json.MarshalIndent(kept, "", "  ")
+	if err != nil {
+		fatalf("%v", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		fatalf("%v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Printf("  ✓ Revoked device %s.\n", id)
+	fmt.Println("  Note: a running 'pixeltui serve' keeps its in-memory copy — restart it to apply.")
+}
+
 // ── update ────────────────────────────────────────────────────────────────────
 
 const repoSlug = "dotjarden/pixeltui"
@@ -1929,6 +2033,8 @@ USAGE
   pixeltui setup                    interactive config (key, scrobbling, Subsonic, folders)
   pixeltui scrobble-auth            authorize Last.fm scrobbling (one-time)
   pixeltui serve [--tunnel --addr]  run the companion-app server (pair via QR)
+  pixeltui devices                  list devices paired with the server
+  pixeltui devices revoke <id>      unpair a device (running serve needs a restart)
   pixeltui update [version]         self-update: latest, or a tag like v0.2.4 (rollback)
   pixeltui version                  print the build version
   pixeltui doctor [--fix]           check setup; --fix auto-resolves what it can

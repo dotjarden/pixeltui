@@ -114,8 +114,15 @@ func expireOf(cdnURL string) int64 {
 }
 
 // streamYouTube serves audio for a video id: m4a proxy first, transcode last.
+// Requests with a Range header (playback) are proxied through untouched; a
+// request without one (a client download) is relayed as sequential ranged
+// chunks, because googlevideo throttles un-ranged transfers to a crawl.
 func (s *server) streamYouTube(w http.ResponseWriter, r *http.Request, videoID string) {
 	if u, err := s.resolveM4A(videoID); err == nil {
+		if r.Header.Get("Range") == "" {
+			s.relayChunked(w, r, u)
+			return
+		}
 		s.proxy(w, r, u)
 		return
 	}

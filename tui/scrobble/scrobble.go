@@ -81,6 +81,18 @@ func (s *Scrobbler) NowPlaying(c engine.Candidate) {
 	}()
 }
 
+// Love marks a liked track as loved on Last.fm — the profile-side mirror of a
+// library like. Fire-and-forget like NowPlaying: errors are dropped, and only
+// Last.fm is involved (ListenBrainz has no equivalent worth submitting).
+func (s *Scrobbler) Love(c engine.Candidate) {
+	if s == nil || s.lastfm == nil || c.Artist == "" || c.Track == "" {
+		return
+	}
+	go func() {
+		s.lastfm.Love(c.Artist, c.Track) //nolint:errcheck
+	}()
+}
+
 // Scrobble submits one qualified play (caller enforces the 50%/4-minute rule).
 // Asynchronous; failures are spooled and retried by the next RetrySpool.
 func (s *Scrobbler) Scrobble(c engine.Candidate, startedAt time.Time) {

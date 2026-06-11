@@ -2098,6 +2098,9 @@ func (m model) likeCand(c engine.Candidate, ok bool) (tea.Model, tea.Cmd) {
 		m.lib.Like(c)
 		m.st.likedKeys[k] = true
 		m.status = "♥ Liked — " + truncate(c.Track, 30)
+		if m.scrobbleOn {
+			m.scrobbler.Love(c) // mirror the like to Last.fm (track.love)
+		}
 	}
 	m.isErr = false
 	return m, nil

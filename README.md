@@ -234,6 +234,8 @@ pixeltui [track] [artist]         start seeded from a track
 pixeltui setup                    interactive config wizard
 pixeltui scrobble-auth            authorize Last.fm scrobbling (one-time)
 pixeltui serve [--tunnel …]       companion-app server (see "Companion server")
+pixeltui devices                  list devices paired with the server
+pixeltui devices revoke <id>      unpair a device (running serve needs a restart)
 pixeltui update [version]         self-update: latest, or a tag like v0.2.4
 pixeltui doctor [--fix]           check setup; --fix auto-installs/repairs deps
 pixeltui reset [target]           wipe data: cache | graph | library | config | all
