@@ -329,9 +329,7 @@ func (s *server) handleLiked(w http.ResponseWriter, _ *http.Request) {
 		s.writeTracks(w, nil, nil)
 		return
 	}
-	liked := s.cfg.Library.Liked()
-	s.writeTracks(w, liked, nil)
-	s.normalizeAsync(library.LikedName, liked)
+	s.writeTracks(w, s.cfg.Library.Liked(), nil)
 }
 
 func (s *server) handlePlaylists(w http.ResponseWriter, _ *http.Request) {
@@ -351,9 +349,6 @@ func (s *server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	tracks, err := s.cfg.Library.LoadPlaylist(name)
 	s.writeTracks(w, tracks, err)
-	if err == nil {
-		s.normalizeAsync(name, tracks)
-	}
 }
 
 func (s *server) handleLocal(w http.ResponseWriter, _ *http.Request) {
