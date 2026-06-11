@@ -286,7 +286,17 @@ func (s *server) handleSources(w http.ResponseWriter, _ *http.Request) {
 	if len(s.cfg.LocalDirs) > 0 {
 		srcs = append(srcs, "local")
 	}
-	writeJSON(w, map[string]any{"sources": srcs, "name": s.cfg.Name})
+	// Every address this server answers on. Clients save the list and walk
+	// it when their stored address stops responding — quick tunnels mint a
+	// new URL on every start, but the LAN address keeps working at home.
+	endpoints := []string{}
+	if s.cfg.URL != "" {
+		endpoints = append(endpoints, strings.TrimRight(s.cfg.URL, "/"))
+	}
+	if lan := s.lanURL(); lan != "" && (len(endpoints) == 0 || endpoints[0] != lan) {
+		endpoints = append(endpoints, lan)
+	}
+	writeJSON(w, map[string]any{"sources": srcs, "name": s.cfg.Name, "endpoints": endpoints})
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -657,6 +667,11 @@ func (s *server) baseURL() string {
 	if s.cfg.URL != "" {
 		return strings.TrimRight(s.cfg.URL, "/")
 	}
+	return s.lanURL()
+}
+
+// lanURL is the server's address on the local network.
+func (s *server) lanURL() string {
 	port := s.cfg.Addr
 	if strings.HasPrefix(port, ":") {
 		// keep as ":8787"

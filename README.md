@@ -424,6 +424,14 @@ process, wait for the public URL, bake it into the pairing QR, and tear the
 tunnel down when the server stops. `--tunnel tailscale` starts nothing — it
 just detects your tailnet DNS name and advertises it.
 
+Note that a Cloudflare **quick** tunnel gets a *new random URL on every
+start*. Paired clients handle this automatically when they can: the server
+advertises all its addresses, and the app falls back across them (e.g. to
+the LAN address when you're home). If the app can't reach any known address
+— a fresh tunnel URL while you're away — paste the new URL in the app under
+Settings → Server → Change Address; the pairing carries over. For a stable
+address, use Tailscale.
+
 ### From anywhere (Tailscale)
 
 The server binds plain HTTP, so don't port-forward it to the open internet —
