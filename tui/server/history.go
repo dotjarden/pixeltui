@@ -69,17 +69,6 @@ type historyDTO struct {
 	PlayedAt int64 `json:"played_at"`
 }
 
-// fillArt backfills artwork for tracks reconstructed from history lines,
-// which don't store an art URL (YouTube thumbnails are derivable).
-func fillArt(d *trackDTO) {
-	if d.Art != "" {
-		return
-	}
-	if kind, vid, ok := splitID(d.ID); ok && kind == "yt" {
-		d.Art = "https://i.ytimg.com/vi/" + vid + "/hqdefault.jpg"
-	}
-}
-
 // handleHistory returns recent listens, most-recent first — the shared
 // Recently Played across the TUI and every client.
 // Query: limit (default 50, max 500), unique=1 to collapse repeat plays.
@@ -118,7 +107,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			}
 			seen[key] = struct{}{}
 		}
-		fillArt(&d)
+
 		out = append(out, historyDTO{trackDTO: d, PlayedAt: l.At.Unix()})
 		if len(out) == limit {
 			break
@@ -188,7 +177,7 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		} else if c.Track != "" {
 			e := statsEntry{Name: c.Track, Artist: c.Artist, Art: c.ArtURL}
 			if d, ok := toDTO(c); ok {
-				fillArt(&d)
+
 				e.StreamID = d.ID
 				if e.Art == "" {
 					e.Art = d.Art

@@ -63,6 +63,11 @@ func Charts(country string, limit int) ([]engine.Candidate, error) {
 	return out, nil
 }
 
+// RemapToSongs swaps each entry's music-video id for its album-song
+// counterpart. Exported for the server's library normalization (playlists
+// pick up MV ids from radio queues and pre-remap charts).
+func RemapToSongs(cands []engine.Candidate) { remapToSongs(cands) }
+
 // remapToSongs swaps each chart entry's music-video id (the only chart YouTube
 // exposes without auth is "Top Music Videos") for its album-song counterpart —
 // clean album audio and square cover art instead of the MV cut and a 16:9

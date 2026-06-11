@@ -329,7 +329,9 @@ func (s *server) handleLiked(w http.ResponseWriter, _ *http.Request) {
 		s.writeTracks(w, nil, nil)
 		return
 	}
-	s.writeTracks(w, s.cfg.Library.Liked(), nil)
+	liked := s.cfg.Library.Liked()
+	s.writeTracks(w, liked, nil)
+	s.normalizeAsync(library.LikedName, liked)
 }
 
 func (s *server) handlePlaylists(w http.ResponseWriter, _ *http.Request) {
@@ -349,6 +351,9 @@ func (s *server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	tracks, err := s.cfg.Library.LoadPlaylist(name)
 	s.writeTracks(w, tracks, err)
+	if err == nil {
+		s.normalizeAsync(name, tracks)
+	}
 }
 
 func (s *server) handleLocal(w http.ResponseWriter, _ *http.Request) {
@@ -617,6 +622,13 @@ func toDTO(c engine.Candidate) (trackDTO, bool) {
 	case c.VideoID != "":
 		d.ID = "yt:" + c.VideoID
 		d.Art = c.ArtURL // public thumbnail URL
+		if d.Art == "" {
+			// Library entries (M3U8 lines without art=) and history lines
+			// carry no art URL, but a YouTube thumbnail is always derivable —
+			// without this, every liked/playlist track renders as a client
+			// fallback gradient.
+			d.Art = "https://i.ytimg.com/vi/" + c.VideoID + "/hqdefault.jpg"
+		}
 		d.Source = "youtube"
 	}
 	return d, d.ID != ""

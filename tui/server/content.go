@@ -302,12 +302,24 @@ func (s *server) handleAlbum(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	tracks := toDTOs(detail.Tracks)
+	art := detail.ArtURL
+	if art == "" {
+		// Some album headers omit the cover; the first track's thumbnail is
+		// better than a blank page header.
+		for _, t := range tracks {
+			if t.Art != "" {
+				art = t.Art
+				break
+			}
+		}
+	}
 	out := map[string]any{
 		"title":  detail.Album.Title,
 		"artist": detail.Album.Artist,
 		"year":   detail.Album.Year,
-		"art":    detail.ArtURL,
-		"tracks": toDTOs(detail.Tracks),
+		"art":    art,
+		"tracks": tracks,
 	}
 	albumCache.put(browseID, out)
 	writeJSON(w, out)
