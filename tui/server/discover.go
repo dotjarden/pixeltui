@@ -75,9 +75,20 @@ func (s *server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var seeds []engine.Seed
-	if a, t := q.Get("artist"), q.Get("track"); a != "" || t != "" {
+	// Explicit multi-seed (seed=Artist|Track, repeated) — the client's
+	// station/autoplay blend, mirroring the TUI's multi-seed stations.
+	for _, sv := range q["seed"] {
+		artist, track, _ := strings.Cut(sv, "|")
+		if artist = strings.TrimSpace(artist); artist != "" {
+			seeds = append(seeds, engine.Seed{Artist: artist, Track: strings.TrimSpace(track)})
+		}
+		if len(seeds) == 4 {
+			break
+		}
+	}
+	if a, t := q.Get("artist"), q.Get("track"); len(seeds) == 0 && (a != "" || t != "") {
 		seeds = []engine.Seed{{Artist: a, Track: t}}
-	} else if s.cfg.Library != nil {
+	} else if len(seeds) == 0 && s.cfg.Library != nil {
 		liked := s.cfg.Library.Liked()
 		rand.Shuffle(len(liked), func(i, j int) { liked[i], liked[j] = liked[j], liked[i] })
 		for _, c := range liked {

@@ -100,6 +100,10 @@ func Run(cfg Config) error {
 	}
 
 	s.printPairing()
+	// Live sync for TUI edits: server-side writes already broadcast SSE, but
+	// the TUI writes the library files directly — poll their mtimes so those
+	// changes reach connected clients too.
+	go s.watchLibrary()
 	srv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           s.handler(),
@@ -139,6 +143,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/charts", s.auth(s.handleCharts))
 	mux.HandleFunc("/api/radio", s.auth(s.handleRadio))
 	mux.HandleFunc("/api/recommend", s.auth(s.handleRecommend))
+	mux.HandleFunc("/api/mixes", s.auth(s.handleMixes))
 	mux.HandleFunc("/api/artist", s.auth(s.handleArtist))
 	mux.HandleFunc("/api/album", s.auth(s.handleAlbum))
 	mux.HandleFunc("/api/devices", s.auth(s.handleDevices))
