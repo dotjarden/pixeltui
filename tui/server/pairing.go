@@ -188,7 +188,11 @@ func (s *server) printPairing() {
 	payload := fmt.Sprintf("pixeltui://pair?url=%s&code=%s", url.QueryEscape(base), s.code)
 
 	fmt.Printf("\n  \033[1mpixeltui server\033[0m — %s\n", s.cfg.Name)
-	fmt.Printf("  Listening on %s   (LAN: %s)\n\n", s.cfg.Addr, base)
+	if s.cfg.URL != "" {
+		fmt.Printf("  Listening on %s   (public: %s · LAN: %s)\n\n", s.cfg.Addr, base, s.lanURL())
+	} else {
+		fmt.Printf("  Listening on %s   (LAN: %s)\n\n", s.cfg.Addr, base)
+	}
 	fmt.Println("  Pair the app — scan this QR (or enter the URL + code):")
 	fmt.Println()
 	if q, err := qrcode.New(payload, qrcode.Medium); err == nil {
