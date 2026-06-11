@@ -194,6 +194,39 @@ func (c *Client) GetTrackTags(artist, track string) ([]string, error) {
 	return tags, nil
 }
 
+// TrackAlbumArt returns the track's album cover URL from track.getInfo
+// (largest image variant), or "" when Last.fm has none.
+func (c *Client) TrackAlbumArt(artist, track string) (string, error) {
+	body, err := c.get(url.Values{
+		"method": {"track.getInfo"},
+		"artist": {artist},
+		"track":  {track},
+	})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Track struct {
+			Album struct {
+				Image []struct {
+					URL  string `json:"#text"`
+					Size string `json:"size"`
+				} `json:"image"`
+			} `json:"album"`
+		} `json:"track"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", err
+	}
+	best := ""
+	for _, img := range resp.Track.Album.Image { // sizes run small → extralarge
+		if img.URL != "" {
+			best = img.URL
+		}
+	}
+	return best, nil
+}
+
 // GetSimilarArtists returns artists similar to the given one.
 func (c *Client) GetSimilarArtists(artist string, limit int) ([]SimilarArtist, error) {
 	body, err := c.get(url.Values{

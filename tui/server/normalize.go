@@ -55,7 +55,11 @@ func (s *server) normalizeAsync(name string, tracks []engine.Candidate) {
 
 		changed := map[string]engine.Candidate{} // old videoID → song version
 		for i := range yt {
-			if fixed[i].VideoID != yt[i].VideoID {
+			switch {
+			case fixed[i].VideoID != yt[i].VideoID, // MV → album song
+				yt[i].ArtURL == "" && fixed[i].ArtURL != "", // gained official art
+				yt[i].Album == "" && fixed[i].Album != "",
+				yt[i].DurationSec == 0 && fixed[i].DurationSec > 0:
 				changed[yt[i].VideoID] = fixed[i]
 			}
 		}
