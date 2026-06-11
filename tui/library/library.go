@@ -419,6 +419,10 @@ type lbInfo struct {
 	MusicService string `json:"music_service"`
 	OriginURL    string `json:"origin_url,omitempty"`
 	DurationMS   int    `json:"duration_ms,omitempty"`
+	// Art is a pixeltui extension (additional_info is free-form per the
+	// ListenBrainz spec): the cover URL travels with the listen so history
+	// rows render real artwork without any lookups.
+	Art string `json:"art,omitempty"`
 }
 
 // listenOf builds the ListenBrainz listen object for a play of c at time at.
@@ -436,6 +440,7 @@ func listenOf(c engine.Candidate, at time.Time) lbListen {
 				MusicService: svc,
 				OriginURL:    uri(c),
 				DurationMS:   c.DurationSec * 1000,
+				Art:          c.ArtURL,
 			},
 		},
 	}
@@ -524,6 +529,7 @@ func candidateOf(l lbListen) engine.Candidate {
 		Artist:      l.TrackMetadata.ArtistName,
 		DurationSec: l.TrackMetadata.AdditionalInfo.DurationMS / 1000,
 		Source:      l.TrackMetadata.AdditionalInfo.MusicService,
+		ArtURL:      l.TrackMetadata.AdditionalInfo.Art,
 	}
 	c.StreamURL, c.VideoID = splitURI(l.TrackMetadata.AdditionalInfo.OriginURL, "")
 	return c

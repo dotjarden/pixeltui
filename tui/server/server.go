@@ -75,9 +75,6 @@ type server struct {
 	// Collapses concurrent stream-URL resolutions for the same track (AVPlayer
 	// opens several range requests at once) onto a single resolve.
 	resolveGroup singleflight.Group
-
-	// Resolves official album art for tracks that carry none (artresolve.go).
-	artRes *artResolver
 }
 
 // maxPairFails rotates the pairing code after this many consecutive bad codes.
@@ -100,7 +97,6 @@ func Run(cfg Config) error {
 		devices: openDeviceStore(cfg.DataDir),
 		code:    randCode(),
 		sse:     newSSEHub(),
-		artRes:  newArtResolver(),
 	}
 
 	s.printPairing()
@@ -602,9 +598,7 @@ func (s *server) writeTracks(w http.ResponseWriter, cs []engine.Candidate, err e
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	ds := toDTOs(cs)
-	s.fillResolvedArt(ds) // official covers for art-less library entries
-	writeJSON(w, map[string]any{"tracks": ds})
+	writeJSON(w, map[string]any{"tracks": toDTOs(cs)})
 }
 
 // toDTO converts a candidate to a client-safe payload, deriving an opaque stream

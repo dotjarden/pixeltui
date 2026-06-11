@@ -94,8 +94,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seen := map[string]struct{}{}
-	flat := make([]trackDTO, 0, limit)
-	ats := make([]int64, 0, limit)
+	out := make([]historyDTO, 0, limit)
 	for _, l := range listens {
 		d, ok := toDTO(l.Candidate)
 		if !ok {
@@ -108,17 +107,10 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			}
 			seen[key] = struct{}{}
 		}
-		flat = append(flat, d)
-		ats = append(ats, l.At.Unix())
-		if len(flat) == limit {
+		out = append(out, historyDTO{trackDTO: d, PlayedAt: l.At.Unix()})
+		if len(out) == limit {
 			break
 		}
-	}
-	// History lines never store art — swap in the official covers.
-	s.fillResolvedArt(flat)
-	out := make([]historyDTO, len(flat))
-	for i := range flat {
-		out[i] = historyDTO{trackDTO: flat[i], PlayedAt: ats[i]}
 	}
 	writeJSON(w, map[string]any{"tracks": out})
 }
@@ -187,14 +179,6 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 				e.StreamID = d.ID
 				if e.Art == "" {
 					e.Art = d.Art
-				}
-			}
-			// Prefer the official cover over a derived video thumbnail.
-			if e.Art == "" || isVideoThumb(e.Art) {
-				if art, ok := s.lookupArt(c.Artist, c.Track); ok && art != "" {
-					e.Art = art
-				} else if !ok {
-					s.queueArtResolve(c.Artist, c.Track)
 				}
 			}
 			tracks[tk] = &agg{entry: e, plays: 1}
