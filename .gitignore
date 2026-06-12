@@ -14,7 +14,7 @@
 .DS_Store
 *.swp
 
-# Clients (Flutter companion) — local-only, in development, not tracked yet.
+# Clients (iOS companion app) — local-only, in development, not tracked yet.
 /clients/
 
 # Working docs (design specs / plans) — local-only.
@@ -22,6 +22,3 @@
 
 # Release metadata backup — local-only.
 /.release-backup/
-
-# Stray legacy Flutter dir (moved to clients/flutter) — local-only.
-/app/

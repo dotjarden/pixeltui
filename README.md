@@ -7,6 +7,9 @@ first-class support for self-hosted libraries.
 ![pixeltui demo](docs/demo.gif)
 
 - **Fast & tiny** — a single ~10 MB Go binary, minimal dependencies, no Electron, no daemon.
+- **Instant playback** — streams resolve natively in-process (~0.2s), no Python
+  helper on the hot path; preloading and an on-disk URL cache make most plays
+  start near-instantly.
 - **Works anywhere** — macOS, Linux, and Windows (amd64 / arm64).
 - **Few third parties** — streams from YouTube Music out of the box; optionally
   point it at your own Subsonic/Navidrome server or a folder of local files.
@@ -44,14 +47,14 @@ first-class support for self-hosted libraries.
 
 | Tool      | Required? | Purpose |
 |-----------|-----------|---------|
-| **yt-dlp**  | required  | Resolves YouTube Music audio streams. |
 | **mpv**     | recommended | Pause / seek / volume + OS "Now Playing". Without it, audio still plays via ffplay/afplay but transport controls are off. |
+| **yt-dlp**  | optional  | Powers downloads (`d` key) and is the stream-resolution *fallback*. Streaming itself resolves natively in-process (InnerTube, ~0.2s) — no yt-dlp needed to play. |
 | **ffmpeg**  | optional  | `ffprobe` reads tags for local files; `ffplay` is a playback fallback. |
 
 pixeltui can install and repair these for you — see [`doctor`](#commands).
 
-Streaming a Subsonic/Navidrome server or playing local files does **not** require
-yt-dlp (those play directly).
+Streaming a Subsonic/Navidrome server or playing local files needs none of the
+above beyond a player (those stream directly).
 
 ---
 
@@ -64,7 +67,8 @@ curl -fsSL https://raw.githubusercontent.com/dotjarden/pixeltui/main/install.sh 
 ```
 
 Auto-detects your CPU, downloads the right prebuilt binary, puts `pixeltui` on
-your PATH, and installs the playback dependencies (yt-dlp, mpv). No Go needed.
+your PATH, and installs the optional tools (mpv for controls, yt-dlp for
+downloads). No Go needed.
 
 ### Windows — one line (PowerShell)
 
@@ -176,7 +180,7 @@ One rule keeps the keymap predictable for track actions:
 | `d` / `D` | download |
 | `x` / `X` | mute artist for this session (`X` also skips) |
 | `.` | **actions menu** — everything above, plus **go to artist / album** & start station |
-| `⇧↵` | start an endless station from the selection |
+| `o` / `O` | start an endless station (from selection / playing) |
 
 **Artist & album pages**
 
@@ -201,6 +205,7 @@ One rule keeps the keymap predictable for track actions:
 | Key | Action |
 |-----|--------|
 | `/` | search the current source |
+| `'` | filter the current list in place (fuzzy) |
 | `b` | browse: Liked · playlists · charts · stats · Local · Subsonic (`o` on a playlist starts a blended station · `u` restores a deleted playlist) |
 | `y` | lyrics — `[` `]` nudge the sync, `0` resets |
 | `z` autoplay · `t` sleep timer · `,` settings |
@@ -250,10 +255,10 @@ pixeltui help                     full usage and flags
 Common flags for the recommend/seed mode: `-explore 0..10`, `-deep-cuts`,
 `-no-artist "A,B"`, `-n N`, `-offline`, `-no-tui`, `-key <lastfm>`, `-dev`.
 
-`doctor --fix` self-resolves the keystone dependencies: it installs a
-self-contained **yt-dlp** binary into `~/.pixeltui/bin` (no Python needed) and
-**mpv** — a bundle on macOS, the standalone build on Windows, your package
-manager on Linux.
+`doctor --fix` self-resolves the optional tools: it installs **mpv** — a bundle
+on macOS, the standalone build on Windows, your package manager on Linux — and a
+self-contained **yt-dlp** binary into `~/.pixeltui/bin` (no Python needed; used
+for downloads and as the streaming fallback).
 
 ---
 
@@ -274,6 +279,7 @@ Run `pixeltui setup`, or edit `~/.pixeltui/config.json`:
   "subsonic": { "url": "", "user": "", "pass": "" },
   "local_dirs": [],
   "download_dir": "",
+  "theme": "",
   "explore": 5,
   "autoplay": true,
   "seek_step": 10,
@@ -302,6 +308,7 @@ Every value can also be set by environment variable (env wins over the file):
 | `PIXELTUI_SUBSONIC_URL` / `_USER` / `_PASS` | Subsonic/Navidrome server |
 | `PIXELTUI_LOCAL_DIRS` | local music folders (PATH-style list) |
 | `PIXELTUI_DOWNLOAD_DIR` | where downloads are saved |
+| `PIXELTUI_THEME` | accent theme (default · ocean · matrix · amber · rose · mono) |
 | `PIXELTUI_SERVE_ADDR` / `_URL` / `_TUNNEL` | `pixeltui serve` bind address / public URL / tunnel |
 | `PIXELTUI_YTDLP` / `PIXELTUI_MPV` | override the yt-dlp / mpv binary path |
 
@@ -370,7 +377,11 @@ kept even on `reset all`.
 ## Companion server (experimental)
 
 `pixeltui serve` exposes your library and sources over HTTP so a phone (or any
-client) can browse, search, and stream from anywhere:
+client) can browse, search, and stream from anywhere. A native iOS companion
+app (**PixelPal**, SwiftUI) lives in `clients/ios` with full feature parity —
+offline downloads, two-way like/playlist sync, daily mixes, stations, lyrics,
+and stats. The full HTTP API is documented in [docs/API.md](docs/API.md) if you
+want to build your own client.
 
 ```sh
 pixeltui serve                       # LAN: prints a pairing QR + code
@@ -464,8 +475,23 @@ so a private mesh like Tailscale is the recommended default.
 ## Repository layout
 
 ```
-tui/   the pixeltui Go app (terminal player + `serve`) — go.mod at root
+tui/           the pixeltui Go app — go.mod at root
+  main.go        CLI entry point (all subcommands)
+  tui/           interactive player (Bubble Tea) + playback
+  server/        companion-app HTTP server (`pixeltui serve`)
+  engine/        recommendation scoring engine
+  store/         hybrid data source: graph + bbolt cache + Last.fm
+  innertube/     native YouTube stream resolution (no yt-dlp)
+  library/       likes, playlists, history (M3U8 / JSONL on disk)
+  lastfm/ ytm/ subsonic/ local/   music sources & metadata clients
+  scrobble/ lyrics/ download/ config/   supporting services
+docs/          architecture, server API reference, user guide
+clients/ios/   PixelPal — the iOS companion app (SwiftUI; local-only for now)
 ```
+
+Developer docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
+server HTTP API: [docs/API.md](docs/API.md) ·
+extended user guide: [docs/GUIDE.md](docs/GUIDE.md)
 
 ## Build from source
 
