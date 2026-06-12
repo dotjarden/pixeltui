@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/innertube"
 	"github.com/dotjarden/pixeltui/tui/lyrics"
 	"github.com/dotjarden/pixeltui/tui/ytm"
 )
@@ -430,22 +431,35 @@ type urlCache interface {
 // streamCache is set by Run from Config; nil disables caching.
 var streamCache urlCache
 
-// resolveStreamURL turns a youtube watch URL into a direct CDN audio URL.
-// Because we pass an exact URL (not a search), yt-dlp only extracts — no search.
-// Results are cached to disk by video id until the CDN URL's `expire` time, so
-// replays/restarts are instant and don't re-hit yt-dlp.
-func resolveStreamURL(ytdlp, watchURL string) (string, error) {
-	vid := videoIDOf(watchURL)
-	if streamCache != nil && vid != "" {
-		if u, ok := streamCache.GetStreamURL(vid); ok {
+// resolveStreamURL turns a video id into a direct CDN audio URL. The native
+// InnerTube resolver runs first (~0.2s, single HTTP call, no subprocess);
+// yt-dlp is only the fallback for rare playability quirks, so playback works
+// without yt-dlp installed at all. Results are cached to disk by video id
+// until the CDN URL's `expire` time, so replays/restarts are instant.
+func resolveStreamURL(ytdlp, videoID string) (string, error) {
+	if videoID == "" {
+		return "", fmt.Errorf("no video id")
+	}
+	if streamCache != nil {
+		if u, ok := streamCache.GetStreamURL(videoID); ok {
 			return u, nil
 		}
 	}
 
+	if res, err := innertube.Resolve(context.Background(), videoID); err == nil && res.URL != "" {
+		if streamCache != nil {
+			streamCache.PutStreamURL(videoID, res.URL, res.Expire)
+		}
+		return res.URL, nil
+	}
+
+	if ytdlp == "" {
+		return "", fmt.Errorf("stream resolution failed (no yt-dlp fallback installed)")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	raw, err := exec.CommandContext(ctx, ytdlp,
-		withYT("--get-url", "-f", "bestaudio/best", "--no-playlist", "--quiet", watchURL)...,
+		withYT("--get-url", "-f", "bestaudio/best", "--no-playlist", "--quiet", ytm.WatchURL(videoID))...,
 	).Output()
 	if err != nil {
 		return "", err
@@ -454,23 +468,10 @@ func resolveStreamURL(ytdlp, watchURL string) (string, error) {
 	if u == "" {
 		return "", fmt.Errorf("no stream URL")
 	}
-	if streamCache != nil && vid != "" {
-		streamCache.PutStreamURL(vid, u, expireOf(u))
+	if streamCache != nil {
+		streamCache.PutStreamURL(videoID, u, expireOf(u))
 	}
 	return u, nil
-}
-
-// videoIDOf extracts the v= parameter from a youtube watch URL.
-func videoIDOf(watchURL string) string {
-	i := strings.Index(watchURL, "v=")
-	if i < 0 {
-		return ""
-	}
-	s := watchURL[i+2:]
-	if j := strings.IndexByte(s, '&'); j >= 0 {
-		s = s[:j]
-	}
-	return s
 }
 
 // expireOf reads the googlevideo `expire=` unix timestamp; falls back to +5h.
@@ -544,8 +545,8 @@ func startPlay(c engine.Candidate, preloadedURL string) (*playback, engine.Candi
 
 	// ── 1. Resolve a direct CDN URL ourselves (never mpv's internal hook) ──────
 	cdnURL := preloadedURL
-	if cdnURL == "" && watchURL != "" && ytdlp != "" {
-		if u, err := resolveStreamURL(ytdlp, watchURL); err == nil {
+	if cdnURL == "" && c.VideoID != "" {
+		if u, err := resolveStreamURL(ytdlp, c.VideoID); err == nil {
 			cdnURL = u
 		}
 	}
@@ -555,10 +556,6 @@ func startPlay(c engine.Candidate, preloadedURL string) (*playback, engine.Candi
 		if pb, err := playDirectURL(mpvPath, cdnURL, cover, c); err == nil {
 			return pb, c, nil
 		}
-	}
-
-	if ytdlp == "" {
-		return nil, c, fmt.Errorf("yt-dlp not found\n%s", ytdlpInstall())
 	}
 
 	// ── 3. Fallbacks (resolution failed, or no direct-URL player available) ───
@@ -572,6 +569,10 @@ func startPlay(c engine.Candidate, preloadedURL string) (*playback, engine.Candi
 		if pb, err := launchMPV(mpvPath, target, c.Track, c.Artist, cover); err == nil {
 			return pb, c, nil
 		}
+	}
+
+	if ytdlp == "" {
+		return nil, c, fmt.Errorf("stream resolution failed and yt-dlp (fallback) not found\n%s", ytdlpInstall())
 	}
 
 	// 3b. yt-dlp | ffplay pipe.
@@ -755,11 +756,10 @@ func cmdPreload(c engine.Candidate) tea.Cmd {
 		}
 		c = ensureVideoID(c)
 		key := trackKey(c)
-		ytdlp := ytdlpPath()
-		if ytdlp == "" || c.VideoID == "" {
+		if c.VideoID == "" {
 			return preloadMsg{key: key, c: c, err: fmt.Errorf("preload unavailable")}
 		}
-		url, err := resolveStreamURL(ytdlp, ytm.WatchURL(c.VideoID))
+		url, err := resolveStreamURL(ytdlpPath(), c.VideoID)
 		coverFor(c.ArtURL) // warm the pixelated cover so play time stays instant
 		return preloadMsg{key: key, c: c, url: url, err: err}
 	}

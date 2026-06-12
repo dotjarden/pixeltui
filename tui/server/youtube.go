@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dotjarden/pixeltui/tui/innertube"
 )
 
 // YouTube streaming, fast path: resolve a pre-signed AAC/m4a CDN URL natively
@@ -54,11 +56,11 @@ func (s *server) resolveM4AUncached(videoID, key string) (string, error) {
 	}
 
 	// Fast path: native InnerTube ANDROID_VR resolution (~0.2s, no yt-dlp).
-	if res, err := innertubeResolve(context.Background(), videoID); err == nil && res.url != "" {
+	if res, err := innertube.Resolve(context.Background(), videoID); err == nil && res.URL != "" {
 		if s.cfg.StreamCache != nil {
-			s.cfg.StreamCache.PutStreamURL(key, res.url, res.expire)
+			s.cfg.StreamCache.PutStreamURL(key, res.URL, res.Expire)
 		}
-		return res.url, nil
+		return res.URL, nil
 	}
 
 	// Fallback: yt-dlp resolution (Python; ~2s). Used only when the native

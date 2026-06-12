@@ -1517,7 +1517,8 @@ func cmdDoctor(args []string) {
 	fmt.Printf("\n  \033[1mpixeltui doctor\033[0m  (%s/%s)%s\n\n", runtime.GOOS, runtime.GOARCH,
 		map[bool]string{true: dim + "  --fix" + reset, false: ""}[fix])
 
-	// yt-dlp (required) — self-resolvable.
+	// yt-dlp (optional) — streaming resolves natively via InnerTube; yt-dlp is
+	// the resolution fallback and powers downloads. Self-resolvable.
 	yt := preferredYtdlp()
 	ver := ""
 	if yt != "" {
@@ -1532,7 +1533,7 @@ func cmdDoctor(args []string) {
 	}
 	switch {
 	case yt == "":
-		bad("yt-dlp", "NOT FOUND — playback won't work. Fix: pixeltui doctor --fix")
+		warn("yt-dlp", "not found — streaming works without it (native resolver); needed for downloads + as a stream fallback. Fix: pixeltui doctor --fix")
 	case ver == "?":
 		bad("yt-dlp", "found but won't run — Fix: pixeltui doctor --fix  ("+yt+")")
 	default:
@@ -2114,20 +2115,20 @@ SCROBBLING  (Last.fm + ListenBrainz — optional)
   Toggle live in settings (,).
 
 PLAYBACK SETUP                    (or just run:  pixeltui doctor)
-  yt-dlp   required — resolves the audio stream. Single binary:
-             curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos \
-               -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp
-             (Linux: the "yt-dlp" asset · Windows: yt-dlp.exe)
+  Streams resolve natively (built-in InnerTube resolver, ~0.2s) — no external
+  tool needed for playback.
   mpv      recommended — enables pause/seek/volume + OS Now Playing:
              make stream-setup        # standalone bundle, no package manager
              Without mpv, audio still plays (ffplay/afplay) but no controls.
+  yt-dlp   optional — powers downloads (d key) and is the stream-resolution
+             fallback for rare videos the native resolver can't handle:
+             pixeltui doctor --fix    # installs a self-contained binary
 
 SPEED
-  make fast-ytdlp    install pip yt-dlp (~0.6s startup vs ~8s for the
-                     standalone) → cold play drops from ~20s to ~3s.
-                     Auto-detected at ~/.pixeltui/ytdlp-venv, or set
-                     PIXELTUI_YTDLP=/path/to/yt-dlp.
-  Preloading + an on-disk stream-URL cache make most plays start in ~0.2s.
+  Cold play start is ~0.2–0.5s: native stream resolution plus preloading and
+  an on-disk stream-URL cache. If the native resolver is ever blocked, the
+  yt-dlp fallback kicks in (make fast-ytdlp installs the quick pip build;
+  auto-detected at ~/.pixeltui/ytdlp-venv, or set PIXELTUI_YTDLP=/path).
 
 LIBRARY  (open, portable formats under ~/.pixeltui/library/)
   Likes & playlists  →  M3U8  (export to XSPF: pixeltui export <name>)
