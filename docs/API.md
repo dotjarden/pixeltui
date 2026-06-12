@@ -604,6 +604,18 @@ Events fire from:
   file mtimes/sizes every **3 seconds** and broadcasts `data: "library"` when
   anything changed.
 
+When a supervised tunnel is re-established at a **new public URL** (quick
+tunnels mint one per start; the server auto-restarts a dead tunnel):
+
+```
+event: endpoints
+data: "changed"
+```
+
+On receipt, refetch `GET /api/sources` and replace your stored endpoint list —
+this is how a client connected over LAN learns the new tunnel address before
+it ever needs it.
+
 Keepalive: a comment line `: ping` is sent every **20 seconds** so proxies
 don't kill idle connections.
 

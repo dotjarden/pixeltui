@@ -434,8 +434,12 @@ step) — or in the `server` section of `~/.pixeltui/config.json` — so a plain
 
 `--tunnel cloudflare` and `--tunnel ngrok` spawn the tunnel as a child
 process, wait for the public URL, bake it into the pairing QR, and tear the
-tunnel down when the server stops. `--tunnel tailscale` starts nothing — it
-just detects your tailnet DNS name and advertises it.
+tunnel down when the server stops. The tunnel is **supervised**: if it dies
+mid-session it's restarted automatically (with backoff), and if the restart
+comes back on a different URL the server re-advertises it live — new pairing
+QR in the terminal, updated `/api/sources` endpoints, and a push to connected
+apps so they learn the new address without re-pairing. `--tunnel tailscale`
+starts nothing — it just detects your tailnet DNS name and advertises it.
 
 Note that a Cloudflare **quick** tunnel gets a *new random URL on every
 start*. Paired clients handle this automatically when they can: the server

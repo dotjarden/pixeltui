@@ -188,7 +188,7 @@ func (s *server) printPairing() {
 	payload := fmt.Sprintf("pixeltui://pair?url=%s&code=%s", url.QueryEscape(base), s.code)
 
 	fmt.Printf("\n  \033[1mpixeltui server\033[0m — %s\n", s.cfg.Name)
-	if s.cfg.URL != "" {
+	if s.currentURL() != "" {
 		fmt.Printf("  Listening on %s   (public: %s · LAN: %s)\n\n", s.cfg.Addr, base, s.lanURL())
 	} else {
 		fmt.Printf("  Listening on %s   (LAN: %s)\n\n", s.cfg.Addr, base)
@@ -200,7 +200,7 @@ func (s *server) printPairing() {
 	}
 	fmt.Printf("  URL:  %s\n", base)
 	fmt.Printf("  Code: %s\n\n", s.code)
-	if s.cfg.URL == "" {
+	if s.currentURL() == "" {
 		fmt.Println("  This address only works on your network. From anywhere:")
 		fmt.Println("    pixeltui serve --tunnel tailscale     private mesh (recommended)")
 		fmt.Println("    pixeltui serve --tunnel cloudflare    public URL, no account needed")

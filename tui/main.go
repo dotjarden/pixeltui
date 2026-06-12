@@ -1127,23 +1127,33 @@ func cmdServe(args []string) {
 	if *urlFlag != "" && !flagWasSet(fs, "tunnel") {
 		*tunnelFlag = ""
 	}
-	var tun *server.Tunnel
+	// Supervised tunnel: restarts the provider if it dies and feeds any new
+	// public URL (quick tunnels mint one per start) to the server, which
+	// re-advertises it live (banner, /api/sources, SSE) — paired phones heal
+	// without re-pairing.
+	var urlUpdates chan string
 	if *tunnelFlag != "" {
 		fmt.Printf("  Starting %s tunnel…\n", *tunnelFlag)
-		tun, err = server.StartTunnel(*tunnelFlag, *addr)
+		urlUpdates = make(chan string, 4)
+		sup, err := server.StartSupervised(*tunnelFlag, *addr, func(u string) {
+			select {
+			case urlUpdates <- u:
+			default:
+			}
+		})
 		if err != nil {
 			fatalf("tunnel: %v", err)
 		}
-		if tun != nil {
-			*urlFlag = tun.URL
-			fmt.Printf("  ✓ %s tunnel up: %s\n\n", tun.Provider, tun.URL)
-			defer tun.Close()
+		if sup != nil {
+			*urlFlag = sup.URL()
+			fmt.Printf("  ✓ %s tunnel up: %s\n\n", sup.Provider(), sup.URL())
+			defer sup.Close()
 			// Make sure Ctrl-C also tears the tunnel process down.
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 			go func() {
 				<-sig
-				tun.Close()
+				sup.Close()
 				os.Exit(0)
 			}()
 		}
@@ -1218,6 +1228,7 @@ func cmdServe(args []string) {
 		Lastfm:      lfm,
 		Rec:         rec,
 		Scrobbler:   scrob,
+		URLUpdates:  urlUpdates,
 	})
 	if err != nil {
 		fatalf("serve: %v", err)

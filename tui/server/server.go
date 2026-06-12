@@ -59,12 +59,24 @@ type Config struct {
 	Lastfm      *lastfm.Client      // optional: artist listener stats on artist pages
 	Rec         *engine.Recommender // optional: /api/recommend (needs Last.fm key)
 	Scrobbler   *scrobble.Scrobbler // optional: client plays scrobble like TUI plays
+
+	// URLUpdates feeds public-URL changes from a supervised tunnel (a quick
+	// tunnel gets a fresh URL when it's restarted after dying). The server
+	// re-advertises the new URL in /api/sources, reprints the pairing QR, and
+	// notifies connected clients over SSE so they refresh their endpoints.
+	URLUpdates <-chan string
 }
 
 type server struct {
 	cfg     Config
 	devices *deviceStore
 	sse     *sseHub
+
+	// The advertised public URL can change at runtime when a supervised
+	// tunnel is re-established (see Config.URLUpdates) — always read it via
+	// currentURL(), never cfg.URL.
+	urlMu     sync.RWMutex
+	publicURL string
 
 	// Pairing codes are single-use: rotated after every successful pair and
 	// after maxPairFails bad attempts (with a growing per-attempt delay), so
@@ -94,13 +106,21 @@ func Run(cfg Config) error {
 		}
 	}
 	s := &server{
-		cfg:     cfg,
-		devices: openDeviceStore(cfg.DataDir),
-		code:    randCode(),
-		sse:     newSSEHub(),
+		cfg:       cfg,
+		devices:   openDeviceStore(cfg.DataDir),
+		code:      randCode(),
+		sse:       newSSEHub(),
+		publicURL: cfg.URL,
 	}
 
 	s.printPairing()
+	if cfg.URLUpdates != nil {
+		go func() {
+			for u := range cfg.URLUpdates {
+				s.setPublicURL(u)
+			}
+		}()
+	}
 	// Live sync for TUI edits: server-side writes already broadcast SSE, but
 	// the TUI writes the library files directly — poll their mtimes so those
 	// changes reach connected clients too.
@@ -297,8 +317,8 @@ func (s *server) handleSources(w http.ResponseWriter, _ *http.Request) {
 	// it when their stored address stops responding — quick tunnels mint a
 	// new URL on every start, but the LAN address keeps working at home.
 	endpoints := []string{}
-	if s.cfg.URL != "" {
-		endpoints = append(endpoints, strings.TrimRight(s.cfg.URL, "/"))
+	if u := s.currentURL(); u != "" {
+		endpoints = append(endpoints, strings.TrimRight(u, "/"))
 	}
 	if lan := s.lanURL(); lan != "" && (len(endpoints) == 0 || endpoints[0] != lan) {
 		endpoints = append(endpoints, lan)
@@ -742,10 +762,36 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v) //nolint:errcheck
 }
 
+// currentURL is the live public URL (a supervised tunnel may replace the one
+// the server started with).
+func (s *server) currentURL() string {
+	s.urlMu.RLock()
+	defer s.urlMu.RUnlock()
+	return s.publicURL
+}
+
+// setPublicURL swaps the advertised public URL after a tunnel re-establishes.
+// Connected clients get an SSE nudge to refresh their endpoint list, and the
+// pairing banner is reprinted since the QR baked in the old URL.
+func (s *server) setPublicURL(u string) {
+	s.urlMu.Lock()
+	changed := u != "" && u != s.publicURL
+	if changed {
+		s.publicURL = u
+	}
+	s.urlMu.Unlock()
+	if !changed {
+		return
+	}
+	fmt.Printf("\n  Tunnel re-established at a new address: %s\n", u)
+	s.printPairing()
+	s.sse.broadcast("event: endpoints\ndata: \"changed\"\n\n")
+}
+
 // baseURL is the address advertised in the pairing QR.
 func (s *server) baseURL() string {
-	if s.cfg.URL != "" {
-		return strings.TrimRight(s.cfg.URL, "/")
+	if u := s.currentURL(); u != "" {
+		return strings.TrimRight(u, "/")
 	}
 	return s.lanURL()
 }

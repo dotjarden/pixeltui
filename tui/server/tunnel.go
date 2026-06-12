@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,128 @@ func (t *Tunnel) Close() {
 
 // tunnelTimeout caps how long we wait for a provider to report its URL.
 const tunnelTimeout = 30 * time.Second
+
+// Supervisor keeps a tunnel alive: when the child process dies (quick tunnels
+// are not built for uptime, ngrok free sessions expire), it restarts the
+// provider with backoff and reports the fresh URL — quick tunnels mint a new
+// one per start — through OnURL so the server can re-advertise it.
+type Supervisor struct {
+	provider string
+	addr     string
+	onURL    func(string)
+
+	mu     sync.Mutex
+	cur    *Tunnel
+	closed bool
+	done   chan struct{}
+}
+
+// StartSupervised starts the provider and keeps it running until Close.
+// onURL fires on every re-establishment whose URL differs from the previous
+// one (never for the initial start — read that from URL()). Detection-only
+// providers (tailscale) need no supervision and get none.
+func StartSupervised(provider, addr string, onURL func(string)) (*Supervisor, error) {
+	t, err := StartTunnel(provider, addr)
+	if err != nil || t == nil {
+		return nil, err
+	}
+	sup := &Supervisor{provider: provider, addr: addr, onURL: onURL, cur: t, done: make(chan struct{})}
+	if t.cmd != nil {
+		go sup.watch(t)
+	}
+	return sup, nil
+}
+
+// URL is the tunnel's current public URL.
+func (s *Supervisor) URL() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur == nil {
+		return ""
+	}
+	return s.cur.URL
+}
+
+// Provider names the tunnel provider ("cloudflare", "ngrok", "tailscale").
+func (s *Supervisor) Provider() string {
+	if s == nil {
+		return ""
+	}
+	return s.provider
+}
+
+// Close stops supervision and tears the tunnel down.
+func (s *Supervisor) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	cur := s.cur
+	s.mu.Unlock()
+	close(s.done)
+	cur.Close()
+}
+
+// watch waits on the tunnel process and restarts it when it dies. Backoff
+// doubles 1s → 30s across consecutive failures and resets once a tunnel
+// stays up long enough to have been useful.
+func (s *Supervisor) watch(t *Tunnel) {
+	started := time.Now()
+	t.cmd.Wait() //nolint:errcheck
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	prevURL := t.URL
+	s.mu.Unlock()
+
+	backoff := time.Second
+	if time.Since(started) > time.Minute {
+		backoff = time.Second // healthy run — start the retry ladder fresh
+	}
+	for {
+		fmt.Printf("  ! %s tunnel exited — restarting in %s…\n", s.provider, backoff)
+		select {
+		case <-s.done:
+			return
+		case <-time.After(backoff):
+		}
+		nt, err := StartTunnel(s.provider, s.addr)
+		if err == nil && nt != nil {
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				nt.Close()
+				return
+			}
+			s.cur = nt
+			s.mu.Unlock()
+			if nt.URL != prevURL && s.onURL != nil {
+				s.onURL(nt.URL)
+			}
+			if nt.cmd != nil {
+				go s.watch(nt)
+			}
+			return
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+		}
+	}
+}
 
 // StartTunnel launches the given provider for a server bound at addr and
 // returns once the public URL is known.
