@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -23,10 +24,15 @@ import (
 )
 
 const (
-	playerURL        = "https://youtubei.googleapis.com/youtubei/v1/player"
-	visitorURL       = "https://youtubei.googleapis.com/youtubei/v1/visitor_id"
-	androidVRVersion = "1.61.48"
-	androidVRUA      = "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12)"
+	playerURL  = "https://youtubei.googleapis.com/youtubei/v1/player"
+	visitorURL = "https://youtubei.googleapis.com/youtubei/v1/visitor_id"
+	// Track yt-dlp's current ANDROID_VR clientVersion. HARD CAP: never bump above
+	// 1.65.x — versions >1.65 return SABR-only streams with no `url` field
+	// (unusable for a stdlib resolver; yt-dlp #16168). A *stale* version gets a
+	// bot/consent HTML page back instead of JSON (slow hang → decode error), so
+	// keeping this current with yt-dlp is what keeps native resolution working.
+	androidVRVersion = "1.65.10"
+	androidVRUA      = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
 )
 
 // Result is a resolved stream: a direct AAC/m4a CDN URL, the video's
@@ -59,9 +65,11 @@ func clientContext() map[string]any {
 	c := map[string]any{
 		"clientName":        "ANDROID_VR",
 		"clientVersion":     androidVRVersion,
+		"deviceMake":        "Oculus",
+		"deviceModel":       "Quest 3",
 		"androidSdkVersion": 32,
 		"osName":            "Android",
-		"osVersion":         "12",
+		"osVersion":         "12L",
 	}
 	if vd != "" {
 		c["visitorData"] = vd
@@ -115,8 +123,13 @@ func ensureVisitor(ctx context.Context, force bool) {
 func Resolve(ctx context.Context, videoID string) (Result, error) {
 	ensureVisitor(ctx, false)
 	res, err := player(ctx, videoID)
-	if err != nil && strings.Contains(err.Error(), "LOGIN_REQUIRED") {
-		ensureVisitor(ctx, true) // token stale/bot-flagged — refresh and retry once
+	// Retry once with a fresh visitorData on a FAST logical failure — bot/consent
+	// HTML (decode error), LOGIN_REQUIRED, a non-OK status, or an OK response with
+	// no usable audio/mp4 (YouTube's itag-18-only A/B bucket). Skip the retry on a
+	// transport timeout: a fresh token won't cure a tarpit, and the caller's
+	// yt-dlp fallback should take over fast instead of eating a second timeout.
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		ensureVisitor(ctx, true)
 		res, err = player(ctx, videoID)
 	}
 	return res, err
@@ -130,7 +143,7 @@ func player(ctx context.Context, videoID string) (Result, error) {
 		"racyCheckOk":    true,
 	})
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, playerURL, bytes.NewReader(reqBody))
 	if err != nil {
