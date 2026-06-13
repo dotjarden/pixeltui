@@ -63,11 +63,12 @@ func (c *ttlCache) put(key string, v any) {
 }
 
 var (
-	lyricsCache = newTTLCache(24*time.Hour, 200)
-	chartsCache = newTTLCache(30*time.Minute, 16)
-	artistCache = newTTLCache(time.Hour, 64)
-	albumCache  = newTTLCache(24*time.Hour, 64)
-	searchCache = newTTLCache(10*time.Minute, 64)
+	lyricsCache     = newTTLCache(24*time.Hour, 200)
+	lyricsMissCache = newTTLCache(10*time.Minute, 256) // short-TTL negative cache (LRCLIB miss/timeout)
+	chartsCache     = newTTLCache(30*time.Minute, 16)
+	artistCache     = newTTLCache(time.Hour, 64)
+	albumCache      = newTTLCache(24*time.Hour, 64)
+	searchCache     = newTTLCache(10*time.Minute, 64)
 )
 
 // ── lyrics ──────────────────────────────────────────────────────────────────
@@ -93,6 +94,14 @@ func (s *server) handleLyrics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, v)
 		return
 	}
+	// A recent miss (LRCLIB had nothing, or was too slow and timed out) is cached
+	// briefly so a slow/absent song doesn't re-pay the full fetch on every open.
+	// Short TTL on purpose: LRCLIB slowness is often transient and lyrics get
+	// added over time, so re-check soon rather than blanking the track for long.
+	if _, ok := lyricsMissCache.get(key); ok {
+		writeJSON(w, map[string]any{"synced": []lyricLine{}, "plain": ""})
+		return
+	}
 
 	out := map[string]any{"synced": []lyricLine{}, "plain": ""}
 	found := false
@@ -110,11 +119,13 @@ func (s *server) handleLyrics(w http.ResponseWriter, r *http.Request) {
 			found = true
 		}
 	}
-	// Only cache hits: an empty result may be a transient upstream failure
-	// (LRCLIB blip), and caching it would blank this track's lyrics for the
-	// whole TTL across every client.
+	// Cache hits for a day; cache misses only briefly (lyricsMissCache) so a
+	// transient LRCLIB blip doesn't blank the track for long, but a genuinely
+	// absent/slow song isn't re-fetched on every open within the short window.
 	if found {
 		lyricsCache.put(key, out)
+	} else {
+		lyricsMissCache.put(key, true)
 	}
 	writeJSON(w, out)
 }
