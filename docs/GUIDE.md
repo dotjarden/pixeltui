@@ -153,6 +153,14 @@ focused:
 
 `a` adds the highlighted track to the back of the queue; `A` plays it next.
 
+Track-to-track transitions are **gapless** when mpv is the player: once the
+next queued track's stream URL is preloaded, it's appended to the running
+mpv's playlist over IPC, so the natural end of a song flows straight into the
+next with no process respawn and no silence. Manual skips (`n`) and the
+ffplay/afplay fallbacks use the regular start path. The iOS companion app is
+gapless too, and adds an optional crossfade (Settings → Crossfade,
+2–12 seconds).
+
 ### Browse
 
 `b` opens browse: **Liked Songs · your playlists · charts · listening stats ·

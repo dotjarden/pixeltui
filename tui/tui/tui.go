@@ -154,8 +154,17 @@ type (
 		pos, dur float64
 		paused   bool
 		vol      int
+		plCurID  int // mpv playlist entry id now playing (gapless advance detection)
 		ended    bool
 		gen      int
+	}
+
+	gaplessMsg struct { // result of reconciling mpv's playlist with the queue
+		id  int    // appended playlist entry id (0 = nothing armed)
+		key string // trackKey of the appended candidate
+		c   engine.Candidate
+		gen int
+		err error
 	}
 
 	preloadMsg struct {
@@ -439,6 +448,14 @@ type model struct {
 	repeat  repeatMode
 	sleepAt time.Time // zero = no sleep timer; else stop playback at this time
 
+	// Gapless auto-advance: the queue's next track, appended to the RUNNING
+	// mpv's playlist so natural track ends never pay a process respawn.
+	gaplessID      int              // mpv playlist entry id of the appended track (0 = none)
+	gaplessKey     string           // trackKey of the appended track
+	gaplessC       engine.Candidate // the appended candidate (becomes nowC on advance)
+	gaplessPending bool             // a playlist reconcile is in flight
+	gaplessFailKey string           // last key that failed to append (don't retry every poll)
+
 	// Scrobbling: now-playing is announced on play; the scrobble itself fires
 	// once the track passes 50% or 4 minutes (Last.fm's rule), once per play.
 	scrobbler     *scrobble.Scrobbler // nil = not configured
@@ -709,6 +726,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.ended {
 			ended := m.nowC
+			m.resetGapless()
 			m.now.stop()
 			m.now = nil
 			m.st.nowKey = ""
@@ -735,6 +753,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isErr = false
 			return m, nil
 		}
+		// Gapless: detect mpv auto-advancing into the appended next track, or
+		// reconcile the appended entry with the (possibly edited) queue. Runs
+		// before the position/duration assignments so an advance can still see
+		// the finished track's duration (scrobble check).
+		gapless := m.gaplessSync(msg.plCurID)
 		m.position = msg.pos
 		m.posAt = time.Now() // anchor for between-poll interpolation
 		if msg.dur > 0 {
@@ -754,7 +777,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.volume = msg.vol
 		}
 		// Glide the Charm progress bar toward the true position.
-		return m, tea.Batch(cmdPoll(m.now, m.gen), m.prog.SetPercent(m.ratio()))
+		return m, tea.Batch(cmdPoll(m.now, m.gen), m.prog.SetPercent(m.ratio()), gapless)
 
 	case playOKMsg:
 		// A play the user already superseded (pressed Enter again, skipped, …):
@@ -764,6 +787,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loading = false
+		m.resetGapless() // fresh mpv → fresh playlist; re-arm from its polls
 		m.now = msg.pb
 		m.nowC = msg.c
 		m.st.nowKey = trackKey(msg.c)
@@ -853,6 +877,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case playErrMsg:
 		m.loading = false
+		m.resetGapless()
 		m.now = nil
 		m.st.nowKey = ""
 		m.status = firstLine(msg.err.Error())
@@ -864,6 +889,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil && msg.url != "" {
 			m.st.preloaded[msg.key] = msg.url
 			m.enrichQueue(msg.c)
+		}
+		return m, nil
+
+	case gaplessMsg:
+		// A playlist reconcile finished. Stale generations belong to an mpv
+		// that's already been replaced — drop them.
+		if msg.gen != m.gen {
+			return m, nil
+		}
+		m.gaplessPending = false
+		if msg.err != nil {
+			m.gaplessFailKey = msg.key // don't retry this track every poll
+			return m, nil
+		}
+		if msg.id != 0 {
+			m.gaplessID, m.gaplessKey, m.gaplessC = msg.id, msg.key, msg.c
 		}
 		return m, nil
 
@@ -2742,6 +2783,118 @@ func (m *model) advance() tea.Cmd {
 	return m.advanceForce()
 }
 
+// ── gapless auto-advance (mpv playlist) ───────────────────────────────────────
+
+func (m *model) resetGapless() {
+	m.gaplessID, m.gaplessKey = 0, ""
+	m.gaplessPending = false
+	m.gaplessFailKey = ""
+}
+
+// gaplessSync keeps the running mpv's playlist holding exactly the queue's
+// next (preloaded) track, and detects when mpv crossed the boundary into it.
+// Called from every poll with the playlist entry id mpv is currently on.
+func (m *model) gaplessSync(curID int) tea.Cmd {
+	if m.now == nil || !m.now.canControl() {
+		return nil
+	}
+	// mpv advanced into the appended track on its own — no respawn needed.
+	if m.gaplessID != 0 && curID == m.gaplessID {
+		return m.gaplessAdvanced()
+	}
+	if m.gaplessPending {
+		return nil
+	}
+	// What SHOULD be armed: the queue head, once its CDN URL is preloaded.
+	// Repeat-one replays via the ended path, and autoplay-off means natural
+	// ends stop — neither arms anything.
+	var next *engine.Candidate
+	var url string
+	if m.autoQueue && m.repeat != repeatOne {
+		if h := m.queueHead(); h != nil {
+			if u := m.st.preloaded[trackKey(*h)]; u != "" && trackKey(*h) != m.gaplessFailKey {
+				next, url = h, u
+			}
+		}
+	}
+	switch {
+	case next == nil && m.gaplessID == 0:
+		return nil
+	case next != nil && m.gaplessID != 0 && trackKey(*next) == m.gaplessKey:
+		return nil // armed and correct
+	}
+	// Stale (queue edited) or missing — replace the appended entry.
+	removeID := m.gaplessID
+	m.gaplessID, m.gaplessKey = 0, ""
+	m.gaplessPending = true
+	return cmdGaplessSet(m.now, removeID, next, url, m.gen)
+}
+
+// gaplessAdvanced applies the track change after mpv auto-advanced into the
+// appended entry: same bookkeeping as playOKMsg, minus any process work. The
+// playback generation is unchanged — it's still the same mpv.
+func (m *model) gaplessAdvanced() tea.Cmd {
+	finished := m.nowC
+	next := m.gaplessC
+	m.gaplessID, m.gaplessKey = 0, ""
+
+	// The finished track played to its natural end: scrobble it now if the
+	// 50%/4min rule qualifies and the in-play check hadn't fired yet.
+	if m.scrobbleOn && !m.scrobbleSent && scrobbleDue(m.duration, m.duration) {
+		m.scrobbler.Scrobble(finished, m.scrobbleStart)
+	}
+	if m.repeat == repeatAll {
+		m.appendQueue([]engine.Candidate{finished}) // cycle to the back
+	}
+	// Pop the queue head we just advanced into.
+	if h := m.queueHead(); h != nil && trackKey(*h) == trackKey(next) {
+		m.removeQueueAt(0)
+	}
+
+	m.nowC = next
+	m.st.nowKey = trackKey(next)
+	m.position, m.posAt = 0, time.Now()
+	m.duration = float64(next.DurationSec)
+	m.paused, m.st.paused = false, false
+	m.art = nil
+	m.lyricsSynced = nil
+	m.status = ""
+	m.isErr = false
+	m.scrobbleSent = false
+	m.scrobbleStart = time.Now()
+	if m.scrobbleOn {
+		m.scrobbler.NowPlaying(next)
+	}
+	go notifyNowPlaying(next.Artist, next.Track)
+	if m.lib != nil {
+		m.lib.AddListen(next, time.Now())
+	}
+	// Older mpv ignores per-file options on append — refresh the OS widget
+	// title over IPC either way (same value when the per-file option stuck).
+	if m.now != nil && m.now.socket != "" {
+		sock, title := m.now.socket, next.Track+" — "+next.Artist
+		go ipcCmd(sock, "set_property", "force-media-title", title)
+	}
+
+	cmds := []tea.Cmd{m.preloadQueue(2)}
+	if next.ArtURL != "" && m.artWidth() > 0 {
+		cmds = append(cmds, cmdArt(next.ArtURL, artCols, artRows))
+	}
+	if _, ok := m.lyricsCache[m.st.nowKey]; !ok {
+		cmds = append(cmds, cmdLyrics(next, m.st.nowKey))
+	}
+	if m.showLyrics {
+		m.lyricsBusy = true
+		m.lyricsTrack = next.Track + " — " + next.Artist
+		m.lyricsVP.SetContent("")
+	}
+	if len(m.queue.Items()) == 0 && !m.aqPending {
+		m.aqPending = true
+		cmds = append(cmds, m.refill(next))
+	}
+	return tea.Batch(cmds...)
+}
+
 func (m *model) advanceForce() tea.Cmd {
 	if h := m.queueHead(); h != nil {
 		c := *h
@@ -3841,7 +3994,7 @@ func cmdGoAlbum(album, artist string) tea.Cmd {
 			}
 			pick = 0
 		}
-		detail, err := ytm.BrowseAlbum(hits[pick], 60)
+		detail, err := ytm.BrowseAlbum(hits[pick], 0)
 		if err != nil {
 			return albumPageMsg{err: err}
 		}
@@ -3863,7 +4016,7 @@ func cmdAlbumSearch(query string) tea.Cmd {
 // cmdAlbumPage drills into one album's full page (ordered tracks + metadata).
 func cmdAlbumPage(a ytm.Album) tea.Cmd {
 	return func() tea.Msg {
-		detail, err := ytm.BrowseAlbum(a, 60)
+		detail, err := ytm.BrowseAlbum(a, 0)
 		if err != nil {
 			return albumPageMsg{err: err}
 		}

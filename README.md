@@ -10,6 +10,9 @@ first-class support for self-hosted libraries.
 - **Instant playback** — streams resolve natively in-process (~0.2s), no Python
   helper on the hot path; preloading and an on-disk URL cache make most plays
   start near-instantly.
+- **Gapless playback** — the next queued track is handed to the running mpv
+  ahead of time, so natural track boundaries play straight through with no
+  respawn and no silence (the iOS app does the same, plus optional crossfade).
 - **Works anywhere** — macOS, Linux, and Windows (amd64 / arm64).
 - **Few third parties** — streams from YouTube Music out of the box; optionally
   point it at your own Subsonic/Navidrome server or a folder of local files.
