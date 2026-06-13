@@ -2,12 +2,21 @@ package ytm
 
 import (
 	"fmt"
+	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/dotjarden/pixeltui/tui/engine"
 )
+
+// discographySectionCap bounds how many albums/singles we accumulate per
+// section while following YTM's discography continuations. Continuation chains
+// are normally short, but the cap stops a pathological/looping response from
+// fetching unboundedly; hitting it is logged.
+const discographySectionCap = 200
 
 // ArtistPage is a full artist landing: top songs plus the album/single shelves,
 // like the YouTube Music artist page it's parsed from.
@@ -19,13 +28,27 @@ type ArtistPage struct {
 	Singles     []Album
 }
 
+// topSongsMax bounds the artist Top Songs list. The artist page shelf only
+// shows 5; the shelf's "more" playlist returns ~100 ranked rows — 40 keeps the
+// list a genuine "top songs" page without shipping the full catalog dump.
+const topSongsMax = 40
+
 // BrowseArtist fetches and parses an artist page by channel browse id (UC…).
+// The landing page itself is shallow (5 top songs, first-page carousels), so
+// when YTM exposes "more" endpoints — the song shelf's full playlist and the
+// album/single carousels' discography pages — those are fetched too and
+// replace the shallow sections.
 func BrowseArtist(browseID string) (*ArtistPage, error) {
 	root, err := browse(map[string]interface{}{"browseId": browseID, "context": innerContext("US")})
 	if err != nil {
 		return nil, err
 	}
 	page := &ArtistPage{}
+
+	// "More" endpoints discovered while walking the page (fetched after).
+	var songsPlaylistID string                 // song shelf bottomEndpoint (VL…)
+	type moreEndpoint struct{ id, params string }
+	var albumsMore, singlesMore *moreEndpoint
 
 	// Header: immersive (with description) or visual, depending on the artist.
 	for _, h := range []string{"musicImmersiveHeaderRenderer", "musicVisualHeaderRenderer"} {
@@ -48,17 +71,32 @@ func BrowseArtist(browseID string) (*ArtistPage, error) {
 				if title == "" || strings.Contains(title, "song") {
 					page.TopSongs = append(page.TopSongs,
 						parseRichTrackRows(shelf, page.Name, "", 0, true)...)
+					if id := str(dig(shelf, "bottomEndpoint", "browseEndpoint", "browseId")); id != "" {
+						songsPlaylistID = id
+					}
 				}
 				return
 			}
 			if car, ok := t["musicCarouselShelfRenderer"].(map[string]interface{}); ok {
-				title := strings.ToLower(runText(dig(car,
-					"header", "musicCarouselShelfBasicHeaderRenderer", "title", "runs")))
+				header := dig(car, "header", "musicCarouselShelfBasicHeaderRenderer")
+				title := strings.ToLower(runText(dig(header, "title", "runs")))
+				more := &moreEndpoint{
+					id: str(dig(header, "moreContentButton", "buttonRenderer",
+						"navigationEndpoint", "browseEndpoint", "browseId")),
+					params: str(dig(header, "moreContentButton", "buttonRenderer",
+						"navigationEndpoint", "browseEndpoint", "params")),
+				}
 				switch {
 				case strings.Contains(title, "single"): // "Singles", "Singles & EPs"
 					page.Singles = append(page.Singles, albumCards(car, page.Name)...)
+					if more.id != "" {
+						singlesMore = more
+					}
 				case strings.Contains(title, "album"): // "Albums", "Albums & Singles"
 					page.Albums = append(page.Albums, albumCards(car, page.Name)...)
+					if more.id != "" {
+						albumsMore = more
+					}
 				}
 				return
 			}
@@ -72,6 +110,97 @@ func BrowseArtist(browseID string) (*ArtistPage, error) {
 		}
 	}
 	walk(dig(root, "contents"))
+
+	// Deepen the shallow sections concurrently. Every fetch is best-effort:
+	// on any failure the landing-page slice stays.
+	var wg sync.WaitGroup
+	if songsPlaylistID != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pl, err := browse(map[string]interface{}{
+				"browseId": songsPlaylistID, "context": innerContext("US")})
+			if err != nil {
+				return
+			}
+			if rows := parseRichTrackRows(pl, page.Name, "", topSongsMax, true); len(rows) > len(page.TopSongs) {
+				page.TopSongs = rows
+			}
+		}()
+	}
+	// fetchMore fully paginates a section's discography endpoint. YTM only
+	// returns ~30 entities per page; the rest hang off continuation tokens, so
+	// the first browse is followed by `?continuation=<token>` browses until the
+	// chain ends (or the per-section cap trips). Accumulated cards are deduped
+	// by browseId and sorted newest-first before replacing the shallow slice.
+	fetchMore := func(more *moreEndpoint, dst *[]Album, section string) {
+		defer wg.Done()
+		payload := map[string]interface{}{"browseId": more.id, "context": innerContext("US")}
+		if more.params != "" {
+			payload["params"] = more.params
+		}
+		pg, err := browse(payload)
+		if err != nil {
+			return
+		}
+
+		var acc []Album
+		seen := map[string]bool{}
+		add := func(cards []Album) {
+			for _, c := range cards {
+				if c.BrowseID == "" || seen[c.BrowseID] {
+					continue
+				}
+				seen[c.BrowseID] = true
+				acc = append(acc, c)
+			}
+		}
+		add(albumCards(pg, page.Name))
+
+		// Follow continuation tokens. Each continuation browse reuses the same
+		// endpoint with a `continuation` body field (WEB_REMIX's grid/musicShelf
+		// continuation convention); the response carries the same renderer
+		// shapes albumCards already parses, plus the next token (if any).
+		token := continuationToken(pg)
+		capped := false
+		for token != "" {
+			if len(acc) >= discographySectionCap {
+				capped = true
+				break
+			}
+			next, err := browse(map[string]interface{}{
+				"continuation": token, "context": innerContext("US")})
+			if err != nil {
+				break
+			}
+			before := len(acc)
+			add(albumCards(next, page.Name))
+			token = continuationToken(next)
+			if len(acc) == before && token == "" {
+				break // no new cards and no further token — chain exhausted
+			}
+		}
+		if capped {
+			log.Printf("ytm artist %q: %s discography capped at %d items",
+				page.Name, section, discographySectionCap)
+		}
+
+		// Newest first; unknown years sink to the bottom. Stable so the
+		// continuation arrival order is preserved within a year.
+		sortAlbumsByYearDesc(acc)
+		if len(acc) > len(*dst) {
+			*dst = acc
+		}
+	}
+	if albumsMore != nil {
+		wg.Add(1)
+		go fetchMore(albumsMore, &page.Albums, "albums")
+	}
+	if singlesMore != nil {
+		wg.Add(1)
+		go fetchMore(singlesMore, &page.Singles, "singles")
+	}
+	wg.Wait()
 
 	if page.Name == "" && len(page.TopSongs) == 0 && len(page.Albums) == 0 {
 		return nil, fmt.Errorf("artist: empty page")
@@ -113,6 +242,66 @@ func albumCards(car interface{}, artist string) []Album {
 	}
 	walk(car)
 	return out
+}
+
+// continuationToken pulls the next discography page's continuation token from a
+// browse response, supporting both shapes WEB_REMIX emits: the legacy
+// `continuations[].nextContinuationData.continuation` attached to a
+// grid/musicShelf/sectionList, and the newer `continuationItemRenderer` whose
+// `continuationEndpoint.continuationCommand.token` carries it. Returns "" when
+// the response exposes no continuation (the chain has ended).
+func continuationToken(root interface{}) string {
+	var token string
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		if token != "" {
+			return
+		}
+		switch t := v.(type) {
+		case map[string]interface{}:
+			// Newer shape: continuationItemRenderer.
+			if cir, ok := t["continuationItemRenderer"].(map[string]interface{}); ok {
+				if tok := str(dig(cir, "continuationEndpoint",
+					"continuationCommand", "token")); tok != "" {
+					token = tok
+					return
+				}
+			}
+			// Legacy shape: continuations[].nextContinuationData.continuation.
+			if conts, ok := t["continuations"].([]interface{}); ok {
+				for _, c := range conts {
+					if tok := str(dig(c, "nextContinuationData", "continuation")); tok != "" {
+						token = tok
+						return
+					}
+				}
+			}
+			for _, c := range t {
+				walk(c)
+			}
+		case []interface{}:
+			for _, c := range t {
+				walk(c)
+			}
+		}
+	}
+	walk(root)
+	return token
+}
+
+// sortAlbumsByYearDesc orders albums newest-first using the already-parsed Year
+// string; entries with an unknown/unparseable year sort last. Stable, so cards
+// with equal (or missing) years keep their accumulation order.
+func sortAlbumsByYearDesc(albums []Album) {
+	year := func(a Album) int {
+		if n, err := strconv.Atoi(a.Year); err == nil {
+			return n
+		}
+		return -1 // unknown years sink below any real year
+	}
+	sort.SliceStable(albums, func(i, j int) bool {
+		return year(albums[i]) > year(albums[j])
+	})
 }
 
 var (

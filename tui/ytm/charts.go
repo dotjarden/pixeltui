@@ -43,19 +43,39 @@ func Charts(country string, limit int) ([]engine.Candidate, error) {
 	if err != nil {
 		return nil, err
 	}
-	playlistID := findChartPlaylist(page)
-	if playlistID == "" {
+	playlistIDs := findChartPlaylists(page)
+	if len(playlistIDs) == 0 {
 		return nil, fmt.Errorf("charts: no chart playlist found")
 	}
 
-	pl, err := browse(map[string]interface{}{
-		"browseId": playlistID,
-		"context":  innerContext(gl),
-	})
-	if err != nil {
-		return nil, err
+	// The preferred (Trending) playlist is often short (~20 rows) — when it
+	// can't fill the requested limit, top it up from the next chart list
+	// (Daily Top / Top 100), skipping tracks already present.
+	var out []engine.Candidate
+	seen := map[string]bool{}
+	for _, playlistID := range playlistIDs {
+		if len(out) >= limit && limit > 0 {
+			break
+		}
+		pl, err := browse(map[string]interface{}{
+			"browseId": playlistID,
+			"context":  innerContext(gl),
+		})
+		if err != nil {
+			continue
+		}
+		for _, c := range parseTrackRows(pl, limit) {
+			k := strings.ToLower(c.Artist + "|" + c.Track)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, c)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
 	}
-	out := parseTrackRows(pl, limit)
 	if len(out) == 0 {
 		return nil, fmt.Errorf("charts: no tracks parsed")
 	}
@@ -155,11 +175,12 @@ func browse(payload map[string]interface{}) (interface{}, error) {
 	return root, nil
 }
 
-// findChartPlaylist picks the chart playlist id from the charts page. It prefers
-// "Trending" — the genuinely *current* chart — over the "Daily Top"/"Top 100"
-// lists, which YouTube ranks by raw view count and are therefore dominated by
-// evergreen music videos (Michael Jackson, etc.) rather than what's hot now.
-func findChartPlaylist(root interface{}) string {
+// findChartPlaylists returns the chart playlist ids from the charts page in
+// preference order. "Trending" — the genuinely *current* chart — leads; the
+// "Daily Top"/"Top 100" lists (ranked by raw view count, so dominated by
+// evergreen music videos) follow as fill when Trending is shorter than the
+// requested chart size.
+func findChartPlaylists(root interface{}) []string {
 	type card struct{ title, id string }
 	var cards []card
 	var walk func(v interface{})
@@ -185,17 +206,20 @@ func findChartPlaylist(root interface{}) string {
 	}
 	walk(root)
 
+	var out []string
+	used := map[string]bool{}
 	for _, want := range []string{"trending", "daily top", "top 100"} {
 		for _, c := range cards {
-			if strings.Contains(c.title, want) {
-				return c.id
+			if strings.Contains(c.title, want) && !used[c.id] {
+				used[c.id] = true
+				out = append(out, c.id)
 			}
 		}
 	}
-	if len(cards) > 0 {
-		return cards[0].id
+	if len(out) == 0 && len(cards) > 0 {
+		out = append(out, cards[0].id)
 	}
-	return ""
+	return out
 }
 
 // parseTrackRows pulls full track rows (incl. video id / duration / art via

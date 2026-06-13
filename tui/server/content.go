@@ -240,6 +240,40 @@ func (s *server) handleArtist(w http.ResponseWriter, r *http.Request) {
 			Tags: tags, Bio: info.Summary}
 	}()
 
+	// Similar artists ride along from the same Last.fm client, also in flight
+	// with the page browse. Best-effort like stats: nil on no key or failure.
+	type similarArtist struct {
+		Name      string `json:"name"`
+		Art       string `json:"art,omitempty"`
+		Listeners int    `json:"listeners,omitempty"`
+	}
+	similarCh := make(chan []similarArtist, 1)
+	go func() {
+		if s.cfg.Lastfm == nil {
+			similarCh <- nil
+			return
+		}
+		sims, err := s.cfg.Lastfm.GetSimilarArtists(hits[0].Name, 12)
+		if err != nil {
+			similarCh <- nil
+			return
+		}
+		out := make([]similarArtist, 0, len(sims))
+		for _, sa := range sims {
+			if sa.Name == "" {
+				continue
+			}
+			// artist.getSimilar omits listener counts and serves only the
+			// generic placeholder image, so art is left empty — the client
+			// renders a generated circle in its place.
+			out = append(out, similarArtist{Name: sa.Name})
+			if len(out) >= 12 {
+				break
+			}
+		}
+		similarCh <- out
+	}()
+
 	page, err := ytm.BrowseArtist(hits[0].BrowseID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -257,6 +291,9 @@ func (s *server) handleArtist(w http.ResponseWriter, r *http.Request) {
 	}
 	if st := <-statsCh; st != nil {
 		out["stats"] = st
+	}
+	if sims := <-similarCh; len(sims) > 0 {
+		out["similar_artists"] = sims
 	}
 	artistCache.put(key, out)
 	writeJSON(w, out)
@@ -297,7 +334,10 @@ func (s *server) handleAlbum(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, v)
 		return
 	}
-	detail, err := ytm.BrowseAlbum(ytm.Album{Title: title, Artist: artist, BrowseID: browseID}, 60)
+	// No track cap: an album page must show the whole tracklist (long
+	// compilations exceed the old 60), and the browse response is a single
+	// fetch either way.
+	detail, err := ytm.BrowseAlbum(ytm.Album{Title: title, Artist: artist, BrowseID: browseID}, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

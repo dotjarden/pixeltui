@@ -239,8 +239,10 @@ Up to 8 artists and 10 albums, fetched in parallel. Cached **10 min**.
 { "tracks": [trackDTO, ...], "country": "US" }
 ```
 
-Top 50 from YouTube Music. Cached **30 min** per country (cap 16). `502` on
-upstream failure.
+Top 50 from YouTube Music. The Trending playlist leads; when it is shorter
+than 50 the list is topped up from the Daily Top / Top 100 charts (duplicates
+skipped), so the response reliably carries 50 tracks. Cached **30 min** per
+country (cap 16). `502` on upstream failure.
 
 #### `GET /api/artist` — auth
 
@@ -257,13 +259,23 @@ Full artist page resolved by name.
   "albums":  [albumDTO, ...],
   "singles": [albumDTO, ...],
   "stats": { "listeners": 1200000, "playcount": 53000000,
-             "tags": ["indie rock", "indie"], "bio": "..." }
+             "tags": ["indie rock", "indie"], "bio": "..." },
+  "similar_artists": [ { "name": "Artist", "art": "https://...", "listeners": 0 }, ... ]
 }
 ```
 
-`stats` (Last.fm listeners/playcount/up-to-4 tags/bio) appears only when the
-server has a Last.fm key. Cached **1 h** per lowercased name (cap 64). `404` if
-no artist matches; `502` on upstream failure.
+`top_songs` is the artist's ranked songs list (up to 40 — the landing page's
+5-song shelf is deepened via its "more" playlist). `albums`/`singles` carry
+the full discography — each "more" page is paged through YouTube Music's
+continuation tokens (up to 200 entities per section) and sorted newest-first —
+otherwise the carousel's first page when no "more" page exists. `stats` (Last.fm
+listeners/playcount/up-to-4 tags/bio) appears only when the server has a
+Last.fm key. `similar_artists` (up to 12, from Last.fm `artist.getSimilar`)
+appears only with a Last.fm key; `art` and `listeners` are omitted when the
+upstream doesn't supply them, and the field is absent entirely when empty.
+Cached **1 h** per lowercased name (cap 64) — stats and similar artists ride
+along in the cached response. `404` if no artist matches; `502` on upstream
+failure.
 
 #### `GET /api/album` — auth
 
@@ -281,8 +293,8 @@ nothing.
   "tracks": [trackDTO, ...] }
 ```
 
-Up to 60 ordered tracks. If the album header has no cover, the first track's
-thumbnail is used. Cached **24 h** per `browse_id` (cap 64).
+The complete ordered tracklist (no cap). If the album header has no cover,
+the first track's thumbnail is used. Cached **24 h** per `browse_id` (cap 64).
 
 #### `GET /api/lyrics` — auth
 
