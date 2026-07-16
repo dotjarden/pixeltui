@@ -153,7 +153,7 @@ func (s *server) handleMixes(w http.ResponseWriter, _ *http.Request) {
 		mixes = append(mixes, mixDTO{
 			Title:  mixTitle(c.tag),
 			Tag:    c.tag,
-			Tracks: toDTOs(playable),
+			Tracks: s.toDTOsWithCaps(playable),
 		})
 	}
 
@@ -218,7 +218,7 @@ func (s *server) handleStation(w http.ResponseWriter, r *http.Request) {
 			playable = append(playable, c)
 		}
 	}
-	resp := map[string]any{"tag": tag, "tracks": toDTOs(playable)}
+	resp := map[string]any{"tag": tag, "tracks": s.toDTOsWithCaps(playable)}
 	if len(playable) > 0 { // an empty result may be a transient upstream failure
 		stationCache.put(tag, resp)
 	}

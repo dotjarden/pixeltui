@@ -243,6 +243,7 @@ func (s *server) handlePlaylistAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.cfg.Library.IndexCandidate(c)
 	s.notifyLibrary("playlists")
 	writeJSON(w, map[string]any{"ok": true})
 }

@@ -23,9 +23,10 @@ const outputTemplate = "%(artist,uploader,creator|Unknown Artist)s/%(album,playl
 func args(dir, watchURL string, thumb bool) []string {
 	a := []string{
 		"--extractor-args", "youtube:player_client=android_vr,web",
-		"-x",                   // extract audio (keeps source codec — no quality loss)
-		"--audio-quality", "0", // best
-		"--embed-metadata", // write artist/title/album/date tags into the file
+		"-x",                          // extract audio (keeps source codec — no quality loss)
+		"--audio-quality", "0",        // best
+		"--concurrent-fragments", "5", // parallel fragment download — the main speed win
+		"--embed-metadata",            // write artist/title/album/date tags into the file
 	}
 	if thumb {
 		a = append(a, "--embed-thumbnail") // cover art (best-effort)

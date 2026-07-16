@@ -46,7 +46,7 @@ func BrowseArtist(browseID string) (*ArtistPage, error) {
 	page := &ArtistPage{}
 
 	// "More" endpoints discovered while walking the page (fetched after).
-	var songsPlaylistID string                 // song shelf bottomEndpoint (VL…)
+	var songsPlaylistID string // song shelf bottomEndpoint (VL…)
 	type moreEndpoint struct{ id, params string }
 	var albumsMore, singlesMore *moreEndpoint
 

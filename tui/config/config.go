@@ -48,17 +48,19 @@ type Server struct {
 
 // Config is the persisted application configuration.
 type Config struct {
-	LastfmKey   string   `json:"lastfm_key"`
-	Scrobble    Scrobble `json:"scrobble"` // Last.fm / ListenBrainz play submission
-	Subsonic    Subsonic `json:"subsonic"`
-	LocalDirs   []string `json:"local_dirs"`   // folders of local audio files
-	DownloadDir string   `json:"download_dir"` // where downloads are saved
-	Theme       string   `json:"theme"`        // accent theme name (default if empty)
-	Explore     int      `json:"explore"`      // 0..10, default 5
-	Autoplay    bool     `json:"autoplay"`     // default true
-	SeekStep    int      `json:"seek_step"`    // seek step in seconds, default 10
-	Charts      Charts   `json:"charts"`       // optional global/country charts
-	Server      Server   `json:"server"`       // `pixeltui serve` defaults
+	LastfmKey      string   `json:"lastfm_key"`
+	Scrobble       Scrobble `json:"scrobble"` // Last.fm / ListenBrainz play submission
+	Subsonic       Subsonic `json:"subsonic"`
+	LocalDirs      []string `json:"local_dirs"`      // folders of local audio files
+	DownloadDir    string   `json:"download_dir"`    // where downloads are saved
+	Theme          string   `json:"theme"`           // accent theme name (default if empty)
+	Explore        int      `json:"explore"`         // 0..10, default 5
+	Autoplay       bool     `json:"autoplay"`        // default true
+	SeekStep       int      `json:"seek_step"`       // seek step in seconds, default 10
+	Charts         Charts   `json:"charts"`          // optional global/country charts
+	Server         Server   `json:"server"`          // `pixeltui serve` defaults
+	AcoustIDAPIKey string   `json:"acoustid_api_key"` // AcoustID web lookup for audio recognition
+	AudioDevice    string   `json:"audio_device"`     // mpv --audio-device (optional)
 }
 
 // Default returns a Config with sensible defaults (Explore=5, Autoplay=true).
@@ -135,7 +137,19 @@ func (c *Config) applyEnv() {
 	if v, ok := os.LookupEnv("PIXELTUI_SERVE_TUNNEL"); ok {
 		c.Server.Tunnel = v
 	}
+	if v, ok := os.LookupEnv("ACOUSTID_API_KEY"); ok {
+		c.AcoustIDAPIKey = v
+	}
+	if v, ok := os.LookupEnv("PIXELTUI_AUDIO_DEVICE"); ok {
+		c.AudioDevice = v
+	}
 }
+
+// HasAcoustID reports whether an AcoustID API key is configured.
+func (c *Config) HasAcoustID() bool { return c.AcoustIDAPIKey != "" }
+
+// HasAudioDevice reports whether a specific mpv audio device is configured.
+func (c *Config) HasAudioDevice() bool { return c.AudioDevice != "" }
 
 // splitDirs splits a PATH-style list, dropping empty entries.
 func splitDirs(v string) []string {

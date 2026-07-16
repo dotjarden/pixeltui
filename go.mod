@@ -12,7 +12,10 @@ require (
 	github.com/sahilm/fuzzy v0.1.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	go.etcd.io/bbolt v1.4.3
-	golang.org/x/sync v0.15.0
+	golang.org/x/image v0.42.0
+	golang.org/x/sync v0.21.0
+	periph.io/x/conn/v3 v3.7.3
+	periph.io/x/host/v3 v3.8.5
 )
 
 require (
@@ -40,5 +43,5 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sys v0.44.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 )

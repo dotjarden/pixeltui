@@ -4,20 +4,28 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"image"
+	_ "image/png" // cover-art decoder for the pocket screen
 	"io"
+	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,14 +35,27 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/dotjarden/pixeltui/tui/config"
+	"github.com/dotjarden/pixeltui/tui/connectivity"
 	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/identify"
 	"github.com/dotjarden/pixeltui/tui/lastfm"
 	"github.com/dotjarden/pixeltui/tui/library"
+	"github.com/dotjarden/pixeltui/tui/local"
+	"github.com/dotjarden/pixeltui/tui/lyrics"
+	"github.com/dotjarden/pixeltui/tui/party"
+	"github.com/dotjarden/pixeltui/tui/player"
+	"github.com/dotjarden/pixeltui/tui/pocket"
+	"github.com/dotjarden/pixeltui/tui/recommend"
 	"github.com/dotjarden/pixeltui/tui/scrobble"
+	"github.com/dotjarden/pixeltui/tui/share"
 	"github.com/dotjarden/pixeltui/tui/server"
+	"github.com/dotjarden/pixeltui/tui/session"
+	"github.com/dotjarden/pixeltui/tui/source"
 	"github.com/dotjarden/pixeltui/tui/store"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
 	"github.com/dotjarden/pixeltui/tui/tui"
+	"github.com/dotjarden/pixeltui/tui/tunnel"
+	"github.com/dotjarden/pixeltui/tui/ytm"
 )
 
 // version is the build version, injected at release time via
@@ -93,6 +114,9 @@ func main() {
 		case "serve":
 			cmdServe(os.Args[2:])
 			return
+		case "pocket":
+			cmdPocket(os.Args[2:])
+			return
 		case "devices":
 			cmdDevices(os.Args[2:])
 			return
@@ -144,11 +168,15 @@ func cmdRecommend(args []string) {
 	// First launch with no config + a real terminal + no seed → guided setup,
 	// then reload so the rest of this run sees the new settings.
 	if !*noTUIFlag && len(fs.Args()) == 0 && *artistFlag == "" && *trackFlag == "" {
-		if _, statErr := os.Stat(config.Path(dir)); os.IsNotExist(statErr) &&
-			isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
+		if needsOnboard(dir) {
 			maybeOnboard(dir)
 			cfg, _ = config.Load(dir)
 		}
+	}
+
+	// Optional mpv audio sink from config (e.g. pocket DAC, Bluetooth target).
+	if cfg.AudioDevice != "" {
+		player.SetAudioDevice(cfg.AudioDevice)
 	}
 
 	// API key precedence: --key  >  env/file (config already merged both).
@@ -191,22 +219,26 @@ func cmdRecommend(args []string) {
 	// Local library (likes/playlists/history/resume) — open best-effort.
 	lib, _ := library.Open(dir)
 
-	// Scrobbling (Last.fm / ListenBrainz) — the client is built whenever creds
-	// are configured so the in-app settings toggle works without a restart; it
-	// only submits when enabled.
-	var scrob *scrobble.Scrobbler
+	// Scrobbling targets: each backend is optional and independent. Build the
+	// registry once, then create the fan-out Scrobbler from it.
+	scrobReg := scrobble.NewRegistry()
 	if cfg.ScrobbleReady() && !*offlineFlag {
-		var lf *scrobble.Lastfm
 		if cfg.LastfmScrobbleReady() {
-			lf = scrobble.NewLastfm(cfg.LastfmKey, cfg.Scrobble.LastfmSecret, cfg.Scrobble.LastfmSession)
+			lf := scrobble.NewLastfm(cfg.LastfmKey, cfg.Scrobble.LastfmSecret, cfg.Scrobble.LastfmSession)
+			if t := scrobble.NewLastfmTarget(lf); t != nil {
+				scrobReg.Register(t)
+			}
 		}
-		var lb *scrobble.ListenBrainz
 		if cfg.Scrobble.ListenBrainzToken != "" {
-			lb = scrobble.NewListenBrainz(cfg.Scrobble.ListenBrainzToken)
+			lb := scrobble.NewListenBrainz(cfg.Scrobble.ListenBrainzToken)
+			if t := scrobble.NewListenBrainzTarget(lb); t != nil {
+				scrobReg.Register(t)
+			}
 		}
-		if scrob = scrobble.New(lf, lb, dir); scrob != nil && cfg.Scrobble.Enabled {
-			go scrob.RetrySpool() // deliver any backlog from offline sessions
-		}
+	}
+	var scrob *scrobble.Scrobbler
+	if cfg.Scrobble.Enabled {
+		scrob = scrobble.New(scrobReg)
 	}
 
 	// Optional Subsonic/Navidrome source (config file or env).
@@ -214,6 +246,23 @@ func cmdRecommend(args []string) {
 	if cfg.HasSubsonic() && !*offlineFlag {
 		sub = subsonic.NewClient(cfg.Subsonic.URL, cfg.Subsonic.User, cfg.Subsonic.Pass)
 	}
+
+	// Central source registry: tells the TUI what each track can do based on its
+	// source (YouTube, Subsonic, local files, etc.).
+	reg := source.NewRegistry()
+	reg.Register(ytm.NewProvider(cache))
+	if sub != nil {
+		reg.Register(subsonic.NewProvider(sub))
+	}
+	if len(cfg.LocalDirs) > 0 {
+		reg.Register(local.NewProvider(dir, cfg.LocalDirs))
+	}
+
+	// Lyric sources: LRCLIB first (synced + no video id), YouTube Music fallback.
+	lyricsReg := lyrics.NewRegistry()
+	lyricsReg.Register(lyrics.NewLRCLIBProvider())
+	lyricsReg.Register(ytm.NewLyricsProvider())
+	lyrics.SetDefault(lyricsReg)
 
 	// Validate we have at least one data source
 	if h.Graph == nil && h.Cache == nil && h.Live == nil {
@@ -251,6 +300,18 @@ func cmdRecommend(args []string) {
 		}
 	}
 
+	// Recommendation engines: YouTube Music radio for direct yt: tracks, Last.fm
+	// graph for artist/track seeds. Any new engine can be registered here.
+	recReg := recommend.NewRegistry()
+	recReg.Register(recommend.NewYouTubeRadioEngine())
+	if rec != nil {
+		recReg.Register(recommend.NewLastfmEngine(rec))
+	}
+
+	// Share-URL resolvers: turn resolved tracks into outbound links.
+	shareReg := share.NewRegistry()
+	shareReg.Register(share.YouTubeMusicResolver{})
+
 	// No seed given — open TUI directly in browse/search mode.
 	if trackName == "" && artistName == "" {
 		tui.Run(tui.Config{
@@ -271,6 +332,10 @@ func cmdRecommend(args []string) {
 			Scrobbler:     scrob,
 			ScrobbleOn:    cfg.Scrobble.Enabled,
 			Lastfm:        h.Live,
+			Sources:       reg,
+			Lyrics:        lyricsReg,
+			Recommend:     recReg,
+			Share:         shareReg,
 		})
 		return
 	}
@@ -374,6 +439,10 @@ func cmdRecommend(args []string) {
 		Scrobbler:     scrob,
 		ScrobbleOn:    cfg.Scrobble.Enabled,
 		Lastfm:        h.Live,
+		Sources:       reg,
+		Lyrics:        lyricsReg,
+		Recommend:     recReg,
+		Share:         shareReg,
 	})
 }
 
@@ -669,6 +738,14 @@ func runSetup(dir string) error {
 			huh.NewConfirm().Title("Autoplay similar tracks when the queue runs out?").Value(&cfg.Autoplay),
 		),
 		huh.NewGroup(
+			huh.NewNote().Title("Audio output").Description("Optional mpv --audio-device for the TUI player.\n"),
+			huh.NewInput().
+				Title("mpv audio device").
+				Description("Leave blank for mpv's default output. Run `mpv --audio-device=help` to list devices.").
+				Placeholder("optional · e.g. coreaudio/...").
+				Value(&cfg.AudioDevice),
+		),
+		huh.NewGroup(
 			huh.NewNote().Title("Subsonic / Navidrome").Description("Optional self-hosted source.\n"),
 			huh.NewInput().Title("Server URL").Placeholder("https://music.example.com").Value(&cfg.Subsonic.URL),
 			huh.NewInput().Title("Username").Value(&cfg.Subsonic.User),
@@ -714,6 +791,15 @@ func runSetup(dir string) error {
 				Placeholder("optional · https://music.example.com").
 				Value(&cfg.Server.PublicURL),
 		),
+		huh.NewGroup(
+			huh.NewNote().Title("Audio recognition").
+				Description("Shazam-like identify for iOS. Local fingerprinting works once you index your library; AcoustID adds cloud lookup.\n"),
+			huh.NewInput().
+				Title("AcoustID API key").
+				Description("Free at https://acoustid.org/api — optional; leave blank to disable cloud lookup").
+				Placeholder("optional · AcoustID application API key").
+				Value(&cfg.AcoustIDAPIKey),
+		),
 	)
 
 	if err := form.Run(); err != nil {
@@ -743,7 +829,13 @@ func runSetup(dir string) error {
 	}
 
 	checkConnections(cfg)
-	fmt.Println("  Next: 'pixeltui doctor' to verify mpv/yt-dlp, or just 'pixeltui' to start.")
+
+	// Auto-run the doctor checks so first-timers reach a verified, ready state
+	// without a second command. No --fix here: install.sh already bootstrapped
+	// deps; this only reports what setup just configured (install→setup→doctor→ready).
+	fmt.Println("\n  Verifying everything's wired up…")
+	runDoctor(dir, cfg, false, false)
+	fmt.Println("  ✓ Ready — run 'pixeltui' to start, or 'pixeltui serve' for the phone app.")
 	return nil
 }
 
@@ -864,6 +956,16 @@ func checkConnections(cfg *config.Config) {
 			fmt.Println("✓ ok")
 		}
 	}
+}
+
+// needsOnboard reports whether this looks like a first run — no config yet, on
+// an interactive terminal — so any entry point can offer guided setup before
+// continuing. Non-interactive invocations (pipes, systemd services) skip it.
+func needsOnboard(dir string) bool {
+	if _, err := os.Stat(config.Path(dir)); !os.IsNotExist(err) {
+		return false // already configured (or an unexpected stat error)
+	}
+	return isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
 }
 
 // maybeOnboard runs a friendly first-launch setup when there's no config yet.
@@ -1110,6 +1212,12 @@ func cmdServe(args []string) {
 		fatalf("%v", err)
 	}
 	cfg, _ := config.Load(dir)
+	// First run on an interactive terminal → guided setup before serving, so
+	// `serve` no longer starts unconfigured (matches the TUI's first-run flow).
+	if needsOnboard(dir) {
+		maybeOnboard(dir)
+		cfg, _ = config.Load(dir)
+	}
 
 	// Config supplies the defaults; flags override per run.
 	defAddr := cfg.Server.Addr
@@ -1135,7 +1243,8 @@ func cmdServe(args []string) {
 	if *tunnelFlag != "" {
 		fmt.Printf("  Starting %s tunnel…\n", *tunnelFlag)
 		urlUpdates = make(chan string, 4)
-		sup, err := server.StartSupervised(*tunnelFlag, *addr, func(u string) {
+		tunnelReg := tunnel.NewDefaultRegistry()
+		sup, err := tunnelReg.StartSupervised(context.Background(), *tunnelFlag, *addr, func(u string) {
 			select {
 			case urlUpdates <- u:
 			default:
@@ -1174,22 +1283,24 @@ func cmdServe(args []string) {
 	if cfg.LastfmKey != "" {
 		lfm = lastfm.NewClient(cfg.LastfmKey)
 	}
-	// Scrobbling for client plays (POST /api/played): same services and spool
+	// Scrobbling targets for client plays (POST /api/played): same registry model
 	// as the TUI, so phone listens reach Last.fm / ListenBrainz too.
-	var scrob *scrobble.Scrobbler
+	scrobReg := scrobble.NewRegistry()
 	if cfg.ScrobbleReady() && cfg.Scrobble.Enabled {
-		var lf *scrobble.Lastfm
 		if cfg.LastfmScrobbleReady() {
-			lf = scrobble.NewLastfm(cfg.LastfmKey, cfg.Scrobble.LastfmSecret, cfg.Scrobble.LastfmSession)
+			lf := scrobble.NewLastfm(cfg.LastfmKey, cfg.Scrobble.LastfmSecret, cfg.Scrobble.LastfmSession)
+			if t := scrobble.NewLastfmTarget(lf); t != nil {
+				scrobReg.Register(t)
+			}
 		}
-		var lb *scrobble.ListenBrainz
 		if cfg.Scrobble.ListenBrainzToken != "" {
-			lb = scrobble.NewListenBrainz(cfg.Scrobble.ListenBrainzToken)
-		}
-		if scrob = scrobble.New(lf, lb, dir); scrob != nil {
-			go scrob.RetrySpool()
+			lb := scrobble.NewListenBrainz(cfg.Scrobble.ListenBrainzToken)
+			if t := scrobble.NewListenBrainzTarget(lb); t != nil {
+				scrobReg.Register(t)
+			}
 		}
 	}
+	scrob := scrobble.New(scrobReg)
 	// Recommendation engine for /api/recommend — the TUI's layered data source
 	// (static graph → bbolt cache → live Last.fm) with liked-artist affinity,
 	// so client recs match the TUI's.
@@ -1215,6 +1326,63 @@ func cmdServe(args []string) {
 			}
 		}
 	}
+	// Central source registry: the server routes search/stream/art through this
+	// instead of hardcoding YouTube/Subsonic/local branches.
+	reg := source.NewRegistry()
+	reg.Register(ytm.NewProvider(streamCache))
+	if sub != nil {
+		reg.Register(subsonic.NewProvider(sub))
+	}
+	if len(cfg.LocalDirs) > 0 {
+		reg.Register(local.NewProvider(dir, cfg.LocalDirs))
+	}
+	// Lyric sources for the server API (and legacy package callers).
+	lyricsReg := lyrics.NewRegistry()
+	lyricsReg.Register(lyrics.NewLRCLIBProvider())
+	lyricsReg.Register(ytm.NewLyricsProvider())
+	lyrics.SetDefault(lyricsReg)
+	// Recommendation engines for the server API.
+	recReg := recommend.NewRegistry()
+	recReg.Register(recommend.NewYouTubeRadioEngine())
+	if rec != nil {
+		recReg.Register(recommend.NewLastfmEngine(rec))
+	}
+
+	// Audio recognition identifiers (local + AcoustID). Both are optional and
+	// independent: if neither is configured, iOS hides the identify option.
+	identifyReg := identify.NewRegistry()
+	localIndex := identify.NewLocalIndex(dir)
+	identifyReg.Register(localIndex)
+	// Share the same local index with the library store so likes/plays and the
+	// bulk background scan below all write to one fingerprint file.
+	lib.SetIdentifyIndex(localIndex)
+	acoustidKey := cfg.AcoustIDAPIKey
+	if acoustidKey == "" {
+		acoustidKey = os.Getenv("ACOUSTID_API_KEY")
+	}
+	if ac := identify.NewAcoustID(acoustidKey); ac != nil {
+		identifyReg.Register(ac)
+	}
+
+	// Background: fingerprint every local file once so identification works
+	// immediately after install or when local directories change, without
+	// waiting for each track to be played first.
+	if lp, ok := reg.ByKey("local").(*local.Provider); ok && localIndex != nil {
+		go func() {
+			ctx := context.Background()
+			tracks, err := lp.All(ctx)
+			if err != nil || len(tracks) == 0 {
+				return
+			}
+			for _, c := range tracks {
+				if c.Path == "" {
+					continue
+				}
+				_ = localIndex.Add(ctx, library.IdentifyIDFor(c), c.Artist, c.Track, c.Album, c.Path, identify.Fingerprint{})
+			}
+		}()
+	}
+
 	err = server.Run(server.Config{
 		DataDir:     dir,
 		Name:        *name,
@@ -1222,17 +1390,297 @@ func cmdServe(args []string) {
 		Addr:        *addr,
 		URL:         *urlFlag,
 		Library:     lib,
+		Sources:     reg,
 		Subsonic:    sub,
 		LocalDirs:   cfg.LocalDirs,
 		StreamCache: streamCache,
 		Lastfm:      lfm,
 		Rec:         rec,
 		Scrobbler:   scrob,
+		Lyrics:      lyricsReg,
+		Recommend:   recReg,
+		Identify:    identifyReg,
 		URLUpdates:  urlUpdates,
 	})
 	if err != nil {
 		fatalf("serve: %v", err)
 	}
+}
+
+// ── pocket (hardware player) ────────────────────────────────────────────────
+
+// cmdPocket runs the hardware-player front-end — a now-playing screen + physical
+// buttons driving the headless player (tui/pocket + tui/session). With --dev it
+// uses a laptop backend (PNG frames + keyboard) so it runs without a Pi; on the
+// device it drives the Pirate Audio ST7789 + buttons over SPI/GPIO.
+func cmdPocket(args []string) {
+	fs := flag.NewFlagSet("pocket", flag.ExitOnError)
+	dev := fs.Bool("dev", false, "laptop dev mode: PNG frames + stdin keys, no Pi hardware")
+	mode := fs.String("mode", "standalone", "standalone | serve")
+	audio := fs.String("audio-device", "", "mpv --audio-device (e.g. the Pirate Audio DAC)")
+	frame := fs.String("frame", "/tmp/pocket.png", "--dev: PNG path frames are written to")
+	fs.Parse(args)
+	pocket.Debug = os.Getenv("POCKET_DEBUG") != "" // log button presses (tap/hold diagnosis)
+
+	if *mode == "serve" { // pocket-as-server: reuse the companion server
+		cmdServe(fs.Args())
+		return
+	}
+
+	dir, err := dataDir()
+	if err != nil {
+		fatalf("%v", err)
+	}
+	cfg, _ := config.Load(dir)
+	if *audio != "" {
+		player.SetAudioDevice(*audio)
+	}
+
+	// Recommender (autoplay fill) + shared stream-URL cache — both best-effort.
+	h := &store.Hybrid{}
+	if cfg.LastfmKey != "" {
+		h.Live = lastfm.NewClient(cfg.LastfmKey)
+	}
+	if gr, gerr := store.LoadGraph(filepath.Join(dir, "graph.bin")); gerr == nil {
+		h.Graph = gr
+	}
+	var streamCache player.Cache
+	if c, cerr := store.OpenCache(filepath.Join(dir, "cache.db")); cerr == nil {
+		streamCache = c
+		player.SetCache(c)
+		h.Cache = c
+		defer c.Close()
+	}
+	var rec session.Recommender
+	if h.Live != nil {
+		rec = engine.New(h, false)
+	}
+
+	ctrl := session.New(session.NewPlayerEngine(), rec, true)
+
+	// Central source registry for the pocket: charts, stream resolution, and
+	// downloads all route through the same provider abstraction as the TUI/server.
+	var sub *subsonic.Client
+	if cfg.HasSubsonic() {
+		sub = subsonic.NewClient(cfg.Subsonic.URL, cfg.Subsonic.User, cfg.Subsonic.Pass)
+	}
+	reg := source.NewRegistry()
+	reg.Register(ytm.NewProvider(streamCache).WithDownloader(player.YtdlpPath()))
+	if sub != nil {
+		reg.Register(subsonic.NewProvider(sub))
+	}
+	if len(cfg.LocalDirs) > 0 {
+		reg.Register(local.NewProvider(dir, cfg.LocalDirs))
+	}
+
+	// Browsable sources for the on-device menus (any may be absent → empty menu).
+	lib, _ := library.Open(dir)
+	src := pocket.Sources{Registry: reg}
+	src.Charts = func() []engine.Candidate {
+		c, _ := reg.Charts(context.Background(), "", 50)
+		return c
+	}
+	if lib != nil {
+		src.Liked = lib.Liked
+		src.Playlists = func() []string { n, _ := lib.ListPlaylists(); return n }
+		src.Playlist = func(name string) []engine.Candidate { t, _ := lib.LoadPlaylist(name); return t }
+		src.History = func() []engine.Candidate { h, _ := lib.History(200); return h }
+	}
+	// On-device files (downloads + local folders) — playable with no network.
+	src.Downloaded = func() []engine.Candidate {
+		dirs := append([]string{}, cfg.LocalDirs...)
+		if cfg.DownloadDir != "" {
+			dirs = append(dirs, cfg.DownloadDir)
+		}
+		tracks, _ := local.Scan(dir, dirs)
+		return tracks
+	}
+	// Per-track actions (the hold-Y menu): like via the library, download via
+	// the source registry (YouTube Music → yt-dlp; other sources return an error).
+	if lib != nil {
+		src.Like = func(c engine.Candidate) { _ = lib.Like(c) }
+		src.Unlike = func(c engine.Candidate) { _ = lib.Unlike(c) }
+		src.IsLiked = lib.IsLiked
+	}
+	src.Download = func(c engine.Candidate) error {
+		id := candidateID(c)
+		if id == "" {
+			return fmt.Errorf("not downloadable (no source id)")
+		}
+		dlDir := cfg.DownloadDir
+		if dlDir == "" {
+			dlDir = filepath.Join(dir, "downloads")
+		}
+		_, err := reg.Download(context.Background(), id, dlDir)
+		return err
+	}
+
+	var (
+		disp pocket.Display
+		btns pocket.Buttons
+	)
+	if *dev {
+		disp = pocket.NewDevDisplay(*frame)
+		btns = pocket.NewDevButtons()
+		fmt.Printf("  pocket [dev] — frames → %s   keys: a/b=up/down  x=back  y=select  (UPPERCASE = hold)\n", *frame)
+	} else {
+		d, derr := pocket.NewPiDisplay()
+		if derr != nil {
+			fatalf("pocket display: %v\n  (not on a Pi? run: pixeltui pocket --dev)", derr)
+		}
+		b, berr := pocket.NewPiButtons()
+		if berr != nil {
+			fatalf("pocket buttons: %v", berr)
+		}
+		disp, btns = d, b
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() { <-sig; cancel() }()
+
+	app := pocket.NewApp(ctrl, disp, btns, src, pocketCover)
+
+	// Host Party: stand up the companion server in-process (once) with a shared
+	// room, mirror local playback into that room so joined phones follow, and show
+	// a join QR. Re-pressing re-shows the QR; a serve failure surfaces on the panel
+	// instead of silently doing nothing. (Phones must run a build with the Party
+	// tab to join — that's the iOS side added alongside this.)
+	serveAddr := cfg.Server.Addr
+	if serveAddr == "" {
+		serveAddr = ":8787"
+	}
+	var (
+		partyMu      sync.Mutex
+		partyStarted bool
+		partyQR      string
+		partyCaption string
+	)
+	app.SetHost(func() {
+		partyMu.Lock()
+		if partyStarted {
+			qr, caption := partyQR, partyCaption
+			partyMu.Unlock()
+			if qr != "" {
+				app.ShowParty(qr, caption)
+			}
+			return
+		}
+		partyStarted = true
+		partyMu.Unlock()
+
+		mgr := party.NewManager()
+		room := mgr.CreateRandom(partyCode)
+		joinURL := lanURL(serveAddr)
+		go func() {
+			// Off the button-handler goroutine: SetParty hands the change to the
+			// render loop and waits for it. The room is the source of truth now —
+			// the pocket follows it and its controls drive it.
+			app.SetParty(room)
+			reg := source.NewRegistry()
+			reg.Register(ytm.NewProvider(nil))
+			if len(cfg.LocalDirs) > 0 {
+				reg.Register(local.NewProvider(dir, cfg.LocalDirs))
+			}
+			lyricsReg := lyrics.NewRegistry()
+			lyricsReg.Register(lyrics.NewLRCLIBProvider())
+			lyricsReg.Register(ytm.NewLyricsProvider())
+			lyrics.SetDefault(lyricsReg)
+			err := server.Run(server.Config{
+				DataDir:   dir,
+				Name:      cfg.Server.Name,
+				Version:   version,
+				Addr:      serveAddr,
+				Library:   lib,
+				Sources:   reg,
+				LocalDirs: cfg.LocalDirs,
+				Lyrics:    lyricsReg,
+				Party:     mgr,
+				Quiet:     true, // the join QR is on the pocket's panel; no stdout banner
+				Ready: func(pairCode string) {
+					qr := fmt.Sprintf("pixeltui://pair?url=%s&code=%s&party=%s",
+						url.QueryEscape(joinURL), pairCode, room.Code())
+					partyMu.Lock()
+					partyQR, partyCaption = qr, "Join "+room.Code()
+					partyMu.Unlock()
+					app.ShowParty(qr, "Join "+room.Code())
+				},
+			})
+			// server.Run returns only on error (or shutdown): allow a retry and
+			// show what went wrong rather than failing silently.
+			partyMu.Lock()
+			partyStarted = false
+			partyMu.Unlock()
+			app.SetParty(nil)
+			if err != nil {
+				app.ShowParty("", "Party error: "+err.Error())
+			}
+		}()
+	})
+
+	// Connectivity: gate streaming + show an offline badge, and auto-resume when
+	// the network returns (the Pi's WiFi reconnects on its own).
+	mon := connectivity.New(nil, 5*time.Second)
+	player.SetOffline(!mon.Online())
+	go mon.Run(ctx)
+	go func() {
+		ch, _ := mon.Subscribe()
+		for online := range ch {
+			player.SetOffline(!online)
+			app.SetOffline(!online)
+		}
+	}()
+
+	go ctrl.Run(ctx, 500*time.Millisecond)
+	app.Run(ctx) //nolint:errcheck
+}
+
+// pocketCover decodes the cached pixelated cover PNG for a track (nil if none) —
+// on-brand for the little pixel screen.
+func pocketCover(c engine.Candidate) image.Image {
+	p := player.CoverFor(c.ArtURL)
+	if p == "" {
+		return nil
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return nil
+	}
+	return img
+}
+
+// lanURL builds the http URL LAN clients use to reach this device's server
+// (first non-loopback IPv4 + the bind address).
+func lanURL(addr string) string {
+	host := "127.0.0.1"
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					host = ip4.String()
+					break
+				}
+			}
+		}
+	}
+	return "http://" + host + addr
+}
+
+// partyCode generates a short, unambiguous room code (no easily-confused chars).
+func partyCode() string {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 4)
+	for i := range b {
+		b[i] = alphabet[rand.Intn(len(alphabet))]
+	}
+	return string(b)
 }
 
 // ── devices ───────────────────────────────────────────────────────────────────
@@ -1506,7 +1954,20 @@ func cmdDoctor(args []string) {
 			fix = true
 		}
 	}
+	dir, err := dataDir()
+	if err != nil {
+		fatalf("%v", err)
+	}
+	cfg, _ := config.Load(dir)
+	runDoctor(dir, cfg, fix, true)
+}
 
+// runDoctor performs the environment/config checks and renders them as a table.
+// With fix=true it self-resolves what it safely can (yt-dlp, mpv), printing
+// progress. When standalone (the `doctor` command) it prints the header and the
+// --fix hint; the post-setup validation pass calls it with standalone=false so
+// only the results table shows.
+func runDoctor(dir string, cfg *config.Config, fix, standalone bool) {
 	dim := "\033[2m"
 	reset := "\033[0m"
 	type drow struct {
@@ -1519,14 +1980,10 @@ func cmdDoctor(args []string) {
 	warn := func(label, detail string) { rows = append(rows, drow{1, label, detail}) }
 	bad := func(label, detail string) { rows = append(rows, drow{2, label, detail}) }
 
-	dir, err := dataDir()
-	if err != nil {
-		fatalf("%v", err)
+	if standalone {
+		fmt.Printf("\n  \033[1mpixeltui doctor\033[0m  (%s/%s)%s\n\n", runtime.GOOS, runtime.GOARCH,
+			map[bool]string{true: dim + "  --fix" + reset, false: ""}[fix])
 	}
-	cfg, _ := config.Load(dir)
-
-	fmt.Printf("\n  \033[1mpixeltui doctor\033[0m  (%s/%s)%s\n\n", runtime.GOOS, runtime.GOARCH,
-		map[bool]string{true: dim + "  --fix" + reset, false: ""}[fix])
 
 	// yt-dlp (optional) — streaming resolves natively via InnerTube; yt-dlp is
 	// the resolution fallback and powers downloads. Self-resolvable.
@@ -1635,6 +2092,19 @@ func cmdDoctor(args []string) {
 		}
 	}
 
+	// Audio recognition (Chromaprint fpcalc). Required for both the TUI's
+	// local-library fingerprinting and iOS microphone identification.
+	if !hasBin("fpcalc") && fix {
+		fmt.Println("  → installing chromaprint (fpcalc)…")
+		fixChromaprint()
+	}
+	switch {
+	case hasBin("fpcalc"):
+		ok("chromaprint", "fpcalc available — audio recognition enabled")
+	default:
+		warn("chromaprint", "fpcalc missing — audio recognition disabled. Fix: pixeltui doctor --fix")
+	}
+
 	// data dir / graph / cache
 	ok("data dir", dir)
 	if gr, err := store.LoadGraph(filepath.Join(dir, "graph.bin")); err == nil {
@@ -1672,10 +2142,12 @@ func cmdDoctor(args []string) {
 		t.Row(icon[r.status], r.name, r.detail)
 	}
 	fmt.Println(t)
-	if !fix {
+	if standalone && !fix {
 		fmt.Printf("  %sRun 'pixeltui doctor --fix' to auto-resolve fixable items.%s\n", dim, reset)
 	}
-	fmt.Println()
+	if standalone {
+		fmt.Println()
+	}
 }
 
 // fixYtdlp installs the self-contained standalone yt-dlp binary into
@@ -1960,6 +2432,65 @@ func findAppBundle(root string) string {
 	return found
 }
 
+// fixChromaprint installs the chromaprint fpcalc binary via the system's
+// package manager. It doesn't return a value: the doctor check re-tests
+// hasBin("fpcalc") afterwards.
+func fixChromaprint() {
+	switch runtime.GOOS {
+	case "darwin":
+		if hasBin("brew") {
+			fmt.Println("    installing chromaprint via Homebrew…")
+			c := exec.Command("brew", "install", "chromaprint")
+			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if c.Run() == nil {
+				return
+			}
+		}
+		fmt.Println("    couldn't auto-install chromaprint — install with: brew install chromaprint")
+	case "linux":
+		pms := [][]string{
+			{"apt-get", "install", "-y", "libchromaprint-tools"},
+			{"apt-get", "install", "-y", "chromaprint-tools"},
+			{"dnf", "install", "-y", "chromaprint-tools"},
+			{"pacman", "-S", "--noconfirm", "chromaprint"},
+			{"zypper", "install", "-y", "chromaprint-fpcalc"},
+		}
+		isRoot := os.Geteuid() == 0
+		hasSudo := hasBin("sudo")
+		for _, pm := range pms {
+			if !hasBin(pm[0]) {
+				continue
+			}
+			if pm[0] == "apt-get" {
+				upd := installCmd(isRoot, hasSudo, []string{"apt-get", "update"})
+				u := exec.Command(upd[0], upd[1:]...)
+				u.Stdin, u.Stdout, u.Stderr = os.Stdin, os.Stdout, os.Stderr
+				u.Run() //nolint:errcheck
+			}
+			argv := installCmd(isRoot, hasSudo, pm)
+			fmt.Printf("    installing chromaprint via %s…\n", pm[0])
+			c := exec.Command(argv[0], argv[1:]...)
+			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+			if c.Run() == nil && hasBin("fpcalc") {
+				return
+			}
+		}
+		fmt.Println("    couldn't auto-install chromaprint — install fpcalc via your package manager")
+	case "windows":
+		fmt.Println("    auto-install not available on Windows — install fpcalc manually")
+	default:
+		fmt.Println("    auto-install unsupported on this OS — install fpcalc manually")
+	}
+}
+
+// installCmd prefixes a package-manager command with sudo when needed.
+func installCmd(isRoot, hasSudo bool, argv []string) []string {
+	if isRoot || !hasSudo {
+		return argv
+	}
+	return append([]string{"sudo", "-n"}, argv...)
+}
+
 // preferredYtdlp mirrors the resolver's lookup order: $PIXELTUI_YTDLP → venv → PATH.
 func preferredYtdlp() string {
 	if p := os.Getenv("PIXELTUI_YTDLP"); p != "" {
@@ -2007,6 +2538,20 @@ func hasBin(name string) bool {
 func fatalf(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", a...)
 	os.Exit(1)
+}
+
+// candidateID builds an opaque source:id for a candidate so the central source
+// registry can route downloads and metadata. YouTube uses yt:videoID, local
+// files use lo:base64(path). Subsonic ids are not reconstructible from a
+// candidate alone, so those return empty.
+func candidateID(c engine.Candidate) string {
+	switch {
+	case c.VideoID != "":
+		return "yt:" + c.VideoID
+	case (c.Source == "local" || c.Source == "library") && c.Path != "":
+		return "lo:" + base64.URLEncoding.EncodeToString([]byte(c.Path))
+	}
+	return ""
 }
 
 func fmtAge(t time.Time) string {

@@ -1,0 +1,72 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "pixeltui",
+  "version": "0.1.0",
+  "identifier": "com.dotjarden.pixeltui",
+  "build": {
+    "frontendDist": "../build",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "sh scripts/dev-sidecar.sh",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "pixeltui",
+        "width": 1100,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$HOME/.pixeltui/downloads/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "nsis", "msi"],
+    "externalBin": ["binaries/pixeltui"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Music",
+    "copyright": "",
+    "shortDescription": "Cross-platform desktop music player for pixeltui",
+    "longDescription": "A Tauri + SvelteKit desktop client that hosts the pixeltui Go server locally, with streaming, downloads, party mode, and OS media integration.",
+    "macOS": {
+      "frameworks": [],
+      "exceptionDomain": "",
+      "signingIdentity": "-",
+      "entitlements": null,
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://releases.dotjarden.com/pixeltui/{{target}}/{{current_version}}"
+      ],
+      "dialog": true,
+      "pubkey": "dW50aWwteW91LXJlcGxhY2Utd2l0aC1hLWFjdHVhbC1lZDI1NTE5LXB1YmxpYy1rZXktZnJvbS10YXVyaS1zaWduaW5n"
+    }
+  }
+}

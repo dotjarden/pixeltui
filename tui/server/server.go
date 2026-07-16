@@ -31,10 +31,15 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/identify"
 	"github.com/dotjarden/pixeltui/tui/lastfm"
 	"github.com/dotjarden/pixeltui/tui/library"
 	"github.com/dotjarden/pixeltui/tui/local"
+	"github.com/dotjarden/pixeltui/tui/lyrics"
+	"github.com/dotjarden/pixeltui/tui/party"
+	"github.com/dotjarden/pixeltui/tui/recommend"
 	"github.com/dotjarden/pixeltui/tui/scrobble"
+	"github.com/dotjarden/pixeltui/tui/source"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
 	"github.com/dotjarden/pixeltui/tui/ytm"
 )
@@ -53,24 +58,43 @@ type Config struct {
 	Addr        string // bind address, e.g. ":8787"
 	URL         string // public base URL for the pairing QR (override for tunnels)
 	Library     *library.Store
-	Subsonic    *subsonic.Client
-	LocalDirs   []string
+	Sources     *source.Registry    // all configured music providers
 	StreamCache StreamURLCache      // optional: makes YouTube replays resolve instantly
 	Lastfm      *lastfm.Client      // optional: artist listener stats on artist pages
 	Rec         *engine.Recommender // optional: /api/recommend (needs Last.fm key)
 	Scrobbler   *scrobble.Scrobbler // optional: client plays scrobble like TUI plays
+	Lyrics      *lyrics.Registry    // optional: lyric sources for /api/lyrics
+	Recommend   *recommend.Registry // optional: recommendation engines for /api/recommend
+	Identify    *identify.Registry  // optional: audio recognition backends for /api/identify
+
+	// Deprecated: kept for backwards-compatible construction until all callers
+	// migrate to Sources. Prefer Sources.
+	Subsonic  *subsonic.Client
+	LocalDirs []string
 
 	// URLUpdates feeds public-URL changes from a supervised tunnel (a quick
 	// tunnel gets a fresh URL when it's restarted after dying). The server
 	// re-advertises the new URL in /api/sources, reprints the pairing QR, and
 	// notifies connected clients over SSE so they refresh their endpoints.
 	URLUpdates <-chan string
+
+	// Party, if set, is shared instead of the server making its own — lets a host
+	// (e.g. the pocket) pre-create a room. Ready, if set, is called once with the
+	// pairing code after startup, so a host can render a join QR on its own screen.
+	Party *party.Manager
+	Ready func(pairCode string)
+
+	// Quiet suppresses the stdout pairing banner (QR + tunnel tips). For embedded
+	// hosts like the pocket, which show the join QR on their own screen — the
+	// banner is just noise over SSH.
+	Quiet bool
 }
 
 type server struct {
 	cfg     Config
 	devices *deviceStore
 	sse     *sseHub
+	party   *party.Manager
 
 	// The advertised public URL can change at runtime when a supervised
 	// tunnel is re-established (see Config.URLUpdates) — always read it via
@@ -105,15 +129,25 @@ func Run(cfg Config) error {
 			cfg.Name = "pixeltui"
 		}
 	}
+	mgr := cfg.Party
+	if mgr == nil {
+		mgr = party.NewManager()
+	}
 	s := &server{
 		cfg:       cfg,
 		devices:   openDeviceStore(cfg.DataDir),
 		code:      randCode(),
 		sse:       newSSEHub(),
+		party:     mgr,
 		publicURL: cfg.URL,
 	}
+	if cfg.Ready != nil {
+		cfg.Ready(s.code)
+	}
 
-	s.printPairing()
+	if !cfg.Quiet {
+		s.printPairing()
+	}
 	if cfg.URLUpdates != nil {
 		go func() {
 			for u := range cfg.URLUpdates {
@@ -138,6 +172,8 @@ func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/pair", s.handlePair)
+	mux.HandleFunc("/api/pairing", s.auth(s.handlePairingInfo))
+	mux.HandleFunc("/api/pairing/qr", s.auth(s.handlePairingQR))
 	mux.HandleFunc("/api/sources", s.auth(s.handleSources))
 	mux.HandleFunc("/api/search", s.auth(s.handleSearch))
 	mux.HandleFunc("/api/search/entities", s.auth(s.handleSearchEntities))
@@ -167,10 +203,29 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/mixes", s.auth(s.handleMixes))
 	mux.HandleFunc("/api/station", s.auth(s.handleStation))
 	mux.HandleFunc("/api/artist", s.auth(s.handleArtist))
+	mux.HandleFunc("/api/artist/extras", s.auth(s.handleArtistExtras))
+	mux.HandleFunc("/api/artist/resolve", s.auth(s.handleArtistResolve))
 	mux.HandleFunc("/api/album", s.auth(s.handleAlbum))
+	mux.HandleFunc("/api/trackinfo", s.auth(s.handleTrackInfo))
+	mux.HandleFunc("/api/trackinfo/youtube", s.auth(s.handleTrackInfoYouTube))
+	mux.HandleFunc("/api/identify", s.auth(s.handleIdentify))
+	mux.HandleFunc("/api/identify/audio", s.auth(s.handleIdentifyAudio))
 	mux.HandleFunc("/api/devices", s.auth(s.handleDevices))
 	mux.HandleFunc("/api/devices/revoke", s.auth(s.handleRevoke))
 	mux.HandleFunc("/events", s.auth(s.handleEvents))
+
+	// Shared listening parties (synced independent playback): the room holds the
+	// authoritative queue + position, each device plays its own synced stream.
+	mux.HandleFunc("/api/party/create", s.auth(s.handlePartyCreate))
+	mux.HandleFunc("/api/party/join", s.auth(s.handlePartyJoin))
+	mux.HandleFunc("/api/party/leave", s.auth(s.handlePartyLeave))
+	mux.HandleFunc("/api/party/state", s.auth(s.handlePartyState))
+	mux.HandleFunc("/api/party/enqueue", s.auth(s.handlePartyEnqueue))
+	mux.HandleFunc("/api/party/next", s.auth(s.handlePartyNext))
+	mux.HandleFunc("/api/party/pause", s.auth(s.handlePartyPause))
+	mux.HandleFunc("/api/party/resume", s.auth(s.handlePartyResume))
+	mux.HandleFunc("/api/party/seek", s.auth(s.handlePartySeek))
+	mux.HandleFunc("/api/party/events", s.auth(s.handlePartyEvents))
 	return withCORS(mux)
 }
 
@@ -306,12 +361,21 @@ func (s *server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 // ── catalog ─────────────────────────────────────────────────────────────────
 
 func (s *server) handleSources(w http.ResponseWriter, _ *http.Request) {
-	srcs := []string{"youtube"}
-	if s.cfg.Subsonic != nil {
-		srcs = append(srcs, "subsonic")
+	var srcs []string
+	if s.cfg.Sources != nil {
+		for _, p := range s.cfg.Sources.All() {
+			srcs = append(srcs, p.Key())
+		}
 	}
-	if len(s.cfg.LocalDirs) > 0 {
-		srcs = append(srcs, "local")
+	if len(srcs) == 0 {
+		// Backwards-compatible fallback while callers migrate.
+		srcs = []string{"youtube"}
+		if s.cfg.Subsonic != nil {
+			srcs = append(srcs, "subsonic")
+		}
+		if len(s.cfg.LocalDirs) > 0 {
+			srcs = append(srcs, "local")
+		}
 	}
 	// Every address this server answers on. Clients save the list and walk
 	// it when their stored address stops responding — quick tunnels mint a
@@ -323,7 +387,11 @@ func (s *server) handleSources(w http.ResponseWriter, _ *http.Request) {
 	if lan := s.lanURL(); lan != "" && (len(endpoints) == 0 || endpoints[0] != lan) {
 		endpoints = append(endpoints, lan)
 	}
-	writeJSON(w, map[string]any{"sources": srcs, "name": s.cfg.Name, "endpoints": endpoints})
+	features := map[string]any{}
+	if s.cfg.Identify != nil {
+		features["identify"] = s.cfg.Identify.AvailableNames()
+	}
+	writeJSON(w, map[string]any{"sources": srcs, "name": s.cfg.Name, "endpoints": endpoints, "features": features})
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -336,27 +404,52 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		res []engine.Candidate
 		err error
 	)
-	switch r.URL.Query().Get("source") {
-	case "subsonic":
-		if s.cfg.Subsonic == nil {
-			http.Error(w, "subsonic not configured", http.StatusBadRequest)
-			return
+	src := r.URL.Query().Get("source")
+	if src == "" {
+		src = "youtube"
+	}
+	var provider source.Provider
+	if s.cfg.Sources != nil {
+		provider = s.cfg.Sources.ByKey(src)
+	}
+	if provider == nil {
+		// Backwards-compatible dispatch until all callers register sources.
+		switch src {
+		case "subsonic":
+			if s.cfg.Subsonic == nil {
+				http.Error(w, "subsonic not configured", http.StatusBadRequest)
+				return
+			}
+			res, err = s.cfg.Subsonic.Search(q, 40)
+		case "local":
+			res, err = s.localSearch(q)
+		default:
+			key := strings.ToLower(strings.TrimSpace(q))
+			if v, ok := searchCache.get(key); ok {
+				res = v.([]engine.Candidate)
+			} else {
+				res, err = ytm.Search(q, 40)
+				if err == nil {
+					searchCache.put(key, res)
+				}
+			}
 		}
-		res, err = s.cfg.Subsonic.Search(q, 40)
-	case "local":
-		res, err = s.localSearch(q)
-	default:
-		// YouTube search is the slow path (~1s) — short TTL cache makes
-		// repeat/debounced queries instant.
+		s.writeTracks(w, res, err)
+		return
+	}
+	// Provider dispatch. YouTube search is the slow path — cache repeat queries.
+	if src == "youtube" {
 		key := strings.ToLower(strings.TrimSpace(q))
 		if v, ok := searchCache.get(key); ok {
 			res = v.([]engine.Candidate)
-			break
+		} else {
+			res, err = provider.Search(r.Context(), q, 40)
+			if err == nil {
+				searchCache.put(key, res)
+			}
 		}
-		res, err = ytm.Search(q, 40)
-		if err == nil {
-			searchCache.put(key, res)
-		}
+	} else {
+		res, err = provider.Search(r.Context(), q, 40)
 	}
 	s.writeTracks(w, res, err)
 }
@@ -452,6 +545,54 @@ func (s *server) localSearch(q string) ([]engine.Candidate, error) {
 // su:<songid> (Subsonic proxy), yt:<videoid> (transcode — later phase).
 func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
+	var (
+		provider source.Provider
+		prefix   string
+		ok       bool
+	)
+	if s.cfg.Sources != nil {
+		provider, prefix, ok = s.cfg.Sources.SourceFor(id)
+	}
+	if !ok {
+		// Legacy fallback using explicit fields until Sources is wired everywhere.
+		s.handleStreamLegacy(w, r, id)
+		return
+	}
+	val := source.StreamID(id)
+	switch prefix {
+	case "lo":
+		path, err := base64.URLEncoding.DecodeString(val)
+		if err != nil || !s.localAllowed(string(path)) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		http.ServeFile(w, r, string(path)) // range-aware
+	case "su":
+		url, err := provider.StreamURL(r.Context(), val)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		s.proxy(w, r, url)
+	case "yt":
+		url, err := provider.ResolveStream(r.Context(), val)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if r.Header.Get("Range") == "" {
+			s.relayChunked(w, r, url)
+			return
+		}
+		s.proxy(w, r, url)
+	default:
+		http.Error(w, "unknown source", http.StatusBadRequest)
+	}
+}
+
+// handleStreamLegacy is the old source-specific stream dispatcher, kept during
+// the migration to the source registry.
+func (s *server) handleStreamLegacy(w http.ResponseWriter, r *http.Request, id string) {
 	kind, val, ok := splitID(id)
 	if !ok {
 		http.Error(w, "bad id", http.StatusBadRequest)
@@ -464,7 +605,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		http.ServeFile(w, r, string(path)) // range-aware
+		http.ServeFile(w, r, string(path))
 	case "su":
 		if s.cfg.Subsonic == nil {
 			http.Error(w, "subsonic not configured", http.StatusBadRequest)
@@ -481,7 +622,38 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 // handleArt proxies a Subsonic cover (keeps server creds off the client). For
 // other sources the client uses the public art URL in the track payload.
 func (s *server) handleArt(w http.ResponseWriter, r *http.Request) {
+	// Artwork is immutable for a given track id. Cache proxied Subsonic covers
+	// at the browser so every rail/card does not pay another upstream request.
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 	id := r.URL.Query().Get("id")
+	var prefix string
+	var ok bool
+	if s.cfg.Sources != nil {
+		_, prefix, ok = s.cfg.Sources.SourceFor(id)
+	}
+	if !ok {
+		// Legacy fallback.
+		s.handleArtLegacy(w, r, id)
+		return
+	}
+	val := source.StreamID(id)
+	switch prefix {
+	case "su":
+		// Subsonic cover art needs the cover id from the original track record.
+		// Until the candidate payload carries that id, reuse the legacy path which
+		// has the same behavior (it proxies by song id via the configured client).
+		s.handleArtLegacy(w, r, id)
+	case "lo":
+		s.localArt(w, r, val)
+	default:
+		// Public URLs (YouTube thumbnails) are served directly by the client from
+		// the track payload; /api/art is only for proxied/extracted art.
+		http.Error(w, "bad id", http.StatusBadRequest)
+	}
+}
+
+func (s *server) handleArtLegacy(w http.ResponseWriter, r *http.Request, id string) {
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 	kind, val, ok := splitID(id)
 	switch {
 	case ok && kind == "su" && s.cfg.Subsonic != nil:
@@ -689,13 +861,14 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // ── track DTO ───────────────────────────────────────────────────────────────
 
 type trackDTO struct {
-	ID       string `json:"id"` // opaque stream id (lo:/su:/yt:)
-	Track    string `json:"track"`
-	Artist   string `json:"artist"`
-	Album    string `json:"album,omitempty"`
-	Duration int    `json:"duration"`
-	Art      string `json:"art,omitempty"`
-	Source   string `json:"source"`
+	ID           string              `json:"id"` // opaque stream id (lo:/su:/yt:)
+	Track        string              `json:"track"`
+	Artist       string              `json:"artist"`
+	Album        string              `json:"album,omitempty"`
+	Duration     int                 `json:"duration"`
+	Art          string              `json:"art,omitempty"`
+	Source       string              `json:"source"`
+	Capabilities source.Capabilities `json:"capabilities"`
 }
 
 func (s *server) writeTracks(w http.ResponseWriter, cs []engine.Candidate, err error) {
@@ -703,13 +876,30 @@ func (s *server) writeTracks(w http.ResponseWriter, cs []engine.Candidate, err e
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, map[string]any{"tracks": toDTOs(cs)})
+	writeJSON(w, map[string]any{"tracks": s.toDTOsWithCaps(cs)})
+}
+
+// toDTOs converts a slice of candidates to client-safe DTOs.
+func toDTOs(cs []engine.Candidate) []trackDTO {
+	out := make([]trackDTO, 0, len(cs))
+	for _, c := range cs {
+		if d, ok := toDTO(c); ok {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // toDTO converts a candidate to a client-safe payload, deriving an opaque stream
 // id and never leaking server-side credentials (Subsonic auth URLs).
 func toDTO(c engine.Candidate) (trackDTO, bool) {
-	d := trackDTO{Track: c.Track, Artist: c.Artist, Album: c.Album, Duration: c.DurationSec, Source: c.Source}
+	d := trackDTO{
+		Track:    strings.TrimSpace(c.Track),
+		Artist:   strings.TrimSpace(c.Artist),
+		Album:    strings.TrimSpace(c.Album),
+		Duration: c.DurationSec,
+		Source:   c.Source,
+	}
 	switch {
 	case c.Source == "subsonic":
 		if id := queryParam(c.StreamURL, "id"); id != "" {
@@ -737,6 +927,32 @@ func toDTO(c engine.Candidate) (trackDTO, bool) {
 		d.Source = "youtube"
 	}
 	return d, d.ID != ""
+}
+
+// toDTOsWithCaps converts candidates and attaches per-source capability objects.
+func (s *server) toDTOsWithCaps(cs []engine.Candidate) []trackDTO {
+	out := make([]trackDTO, 0, len(cs))
+	for _, c := range cs {
+		if d, ok := s.toDTOWithCaps(c); ok {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// toDTOWithCaps is toDTO plus the capability payload clients use to adapt UI actions.
+func (s *server) toDTOWithCaps(c engine.Candidate) (trackDTO, bool) {
+	d, ok := toDTO(c)
+	if !ok {
+		return d, false
+	}
+	if d.ID != "" && s.cfg.Sources != nil {
+		if provider, _, ok2 := s.cfg.Sources.SourceFor(d.ID); ok2 && provider != nil {
+			caps, _ := provider.Capabilities(context.Background(), source.StreamID(d.ID))
+			d.Capabilities = caps
+		}
+	}
+	return d, true
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

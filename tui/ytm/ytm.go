@@ -53,6 +53,20 @@ func Radio(videoID string, limit int) ([]engine.Candidate, error) {
 	return fromTracks(tracks, limit), nil
 }
 
+// TrackByVideoID returns metadata for a single video id via its watch playlist.
+func TrackByVideoID(videoID string) (engine.Candidate, error) {
+	tracks, err := ytmusic.GetWatchPlaylist(videoID)
+	if err != nil {
+		return engine.Candidate{}, err
+	}
+	for _, t := range tracks {
+		if t != nil && t.VideoID == videoID {
+			return fromTrack(t), nil
+		}
+	}
+	return engine.Candidate{}, fmt.Errorf("video id not in watch playlist")
+}
+
 // Lyrics returns the plain-text lyrics for a video id ("" if none found).
 func Lyrics(videoID string) (string, error) {
 	if videoID == "" {
@@ -93,7 +107,7 @@ func joinArtists(artists []ytmusic.Artist) string {
 	names := make([]string, 0, len(artists))
 	for _, a := range artists {
 		if a.Name != "" {
-			names = append(names, a.Name)
+			names = append(names, cleanText(a.Name))
 		}
 	}
 	return strings.Join(names, ", ")

@@ -5,6 +5,7 @@ package library
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/identify"
 )
 
 // likedPlaylist is the reserved playlist name backing Like/Unlike/Liked.
@@ -35,6 +37,10 @@ type Store struct {
 	session   string // <root>/session.json
 
 	mu sync.Mutex // serializes writes (history append, like edits, sessions)
+
+	// Optional audio-recognition indexer. When set, liked/played tracks are
+	// fingerprinted in the background so identify works without manual CLI.
+	identifyIndex *identify.LocalIndex
 }
 
 // Open creates <dataDir>/library/ (and its playlists subdir) if missing and
@@ -47,11 +53,19 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("library: create dirs: %w", err)
 	}
 	return &Store{
-		root:      root,
-		playlists: playlists,
-		history:   filepath.Join(root, "history.jsonl"),
-		session:   filepath.Join(root, "session.json"),
+		root:          root,
+		playlists:     playlists,
+		history:       filepath.Join(root, "history.jsonl"),
+		session:       filepath.Join(root, "session.json"),
+		identifyIndex: identify.NewLocalIndex(dataDir),
 	}, nil
+}
+
+// SetIdentifyIndex swaps the background indexer. Used to share one LocalIndex
+// between the library store and the server's identify registry so both write
+// to the same fingerprint file.
+func (s *Store) SetIdentifyIndex(idx *identify.LocalIndex) {
+	s.identifyIndex = idx
 }
 
 // ---------- helpers ----------
@@ -355,7 +369,13 @@ func (s *Store) Like(c engine.Candidate) error {
 		}
 	}
 	liked = append(liked, c)
-	return s.SavePlaylist(likedPlaylist, liked)
+	if err := s.SavePlaylist(likedPlaylist, liked); err != nil {
+		return err
+	}
+	// Best-effort: keep the audio-recognition index up to date when a new
+	// local/yt track is liked. Errors are non-fatal.
+	s.indexCandidateAsync(c)
+	return nil
 }
 
 // Unlike removes c (matched by likeKey) from "Liked Songs".
@@ -447,6 +467,7 @@ func listenOf(c engine.Candidate, at time.Time) lbListen {
 }
 
 // AddListen appends one ListenBrainz-shaped JSON line to history.jsonl.
+// It also best-effort indexes the track for audio recognition.
 func (s *Store) AddListen(c engine.Candidate, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -459,8 +480,11 @@ func (s *Store) AddListen(c engine.Candidate, at time.Time) error {
 		return err
 	}
 	defer f.Close()
-	_, err = f.Write(append(data, '\n'))
-	return err
+	if _, err = f.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	s.indexCandidateAsync(c)
+	return nil
 }
 
 // History returns up to limit listens, most-recent first. limit <= 0 means all.
@@ -571,7 +595,6 @@ func (s *Store) ExportListenBrainz(w io.Writer) error {
 	return enc.Encode(doc)
 }
 
-// ---------- Session resume ----------
 
 // Session is a resumable playback snapshot.
 type Session struct {
@@ -580,7 +603,62 @@ type Session struct {
 	PositionSec float64            `json:"position_sec"`
 }
 
-// SaveSession writes the session snapshot to session.json.
+// indexCandidateAsync fingerprints one track in the background, adding it to
+// the local identify index. It is best-effort; errors are ignored. The store
+// mutex may be held when called, so the actual work runs in a new goroutine.
+func (s *Store) indexCandidateAsync(c engine.Candidate) {
+	idx := s.identifyIndex
+	if idx == nil {
+		return
+	}
+	id := IdentifyIDFor(c)
+	if id == "" {
+		return
+	}
+	go func() {
+		path := localPathFromID(id)
+		if path == "" && c.VideoID == "" {
+			return
+		}
+		// For local files we can fingerprint directly; for YouTube we rely on
+		// the downloaded file if it exists. Remote tracks without a local file
+		// are skipped silently.
+		if path == "" {
+			return
+		}
+		_ = idx.Add(context.Background(), id, c.Artist, c.Track, c.Album, path, identify.Fingerprint{})
+	}()
+}
+
+// IdentifyIDFor returns the stable stream id used by the identify index.
+func IdentifyIDFor(c engine.Candidate) string {
+	if c.VideoID != "" {
+		return "yt:" + c.VideoID
+	}
+	if c.Path != "" {
+		return "lo:" + c.Path
+	}
+	if c.StreamURL != "" {
+		return "lo:" + c.StreamURL
+	}
+	return ""
+}
+
+// localPathFromID returns the absolute file path for a lo: id, or "" for yt:/su:.
+func localPathFromID(id string) string {
+	if !strings.HasPrefix(id, "lo:") {
+		return ""
+	}
+	return strings.TrimPrefix(id, "lo:")
+}
+
+// IndexCandidate fingerprints a local track immediately. Exposed so server-side
+// playlist additions can be indexed synchronously (the caller already holds
+// the track and we have a path).
+func (s *Store) IndexCandidate(c engine.Candidate) {
+	s.indexCandidateAsync(c)
+}
+
 func (s *Store) SaveSession(sess Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

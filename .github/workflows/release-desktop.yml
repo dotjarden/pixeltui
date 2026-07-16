@@ -1,0 +1,122 @@
+name: Release desktop
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sidecar:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+            binary_name: pixeltui-x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            binary_name: pixeltui-aarch64-apple-darwin
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            binary_name: pixeltui-x86_64-pc-windows-msvc.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            binary_name: pixeltui-aarch64-pc-windows-msvc.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: Build sidecar
+        shell: bash
+        run: |
+          cd ${{ github.workspace }}
+          output="clients/desktop/src-tauri/binaries/${{ matrix.binary_name }}"
+          GOOS=${{ matrix.target == 'x86_64-apple-darwin' && 'darwin' || matrix.target == 'aarch64-apple-darwin' && 'darwin' || 'windows' }} \
+          GOARCH=${{ matrix.target == 'x86_64-apple-darwin' && 'amd64' || matrix.target == 'aarch64-apple-darwin' && 'arm64' || matrix.target == 'x86_64-pc-windows-msvc' && 'amd64' || 'arm64' }} \
+            go build -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "$output" ./tui
+      - name: Upload sidecar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-${{ matrix.target }}
+          path: clients/desktop/src-tauri/binaries/${{ matrix.binary_name }}
+          if-no-files-found: error
+
+  desktop:
+    needs: sidecar
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+            args: '--target x86_64-apple-darwin'
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            args: '--target aarch64-apple-darwin'
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            args: '--target x86_64-pc-windows-msvc'
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            args: '--target aarch64-pc-windows-msvc'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: clients/desktop/pnpm-lock.yaml
+      - name: Download sidecar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sidecar-${{ matrix.target }}
+          path: clients/desktop/src-tauri/binaries/
+      - name: Make sidecar executable (unix)
+        if: runner.os == 'macOS'
+        run: chmod +x clients/desktop/src-tauri/binaries/pixeltui-*
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+        working-directory: clients/desktop
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: clients/desktop/src-tauri
+          key: ${{ matrix.target }}
+      - name: Build Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: clients/desktop
+          args: ${{ matrix.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: 'pixeltui desktop ${{ github.ref_name }}'
+          releaseBody: 'See the assets below to download the installer for your platform.'
+          releaseDraft: true
+          prerelease: false

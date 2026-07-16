@@ -129,6 +129,29 @@ type Tag struct {
 type SimilarArtist struct {
 	Name  string    `json:"name"`
 	Match FlexFloat `json:"match"`
+	Image []struct {
+		URL  string `json:"#text"`
+		Size string `json:"size"`
+	} `json:"image"`
+}
+
+// Artwork returns the largest usable image supplied by Last.fm. The service
+// does not guarantee that an image is present, so callers should still keep a
+// fallback for empty strings.
+func (a SimilarArtist) Artwork() string {
+	for _, wanted := range []string{"extralarge", "large", "medium", "small"} {
+		for _, image := range a.Image {
+			if image.Size == wanted && image.URL != "" {
+				return image.URL
+			}
+		}
+	}
+	for _, image := range a.Image {
+		if image.URL != "" {
+			return image.URL
+		}
+	}
+	return ""
 }
 
 // TopTrack is returned by artist.getTopTracks.
@@ -192,6 +215,68 @@ func (c *Client) GetTrackTags(artist, track string) ([]string, error) {
 		}
 	}
 	return tags, nil
+}
+
+// TrackInfo is the headline metadata from track.getInfo.
+type TrackInfo struct {
+	Name      string
+	Artist    string
+	Album     string
+	Listeners int
+	Playcount int
+	Tags      []string
+	Wiki      string
+	Duration  int // seconds, when Last.fm knows it
+}
+
+// GetTrackInfo returns listeners/playcount/tags/wiki for a track.
+func (c *Client) GetTrackInfo(artist, track string) (*TrackInfo, error) {
+	body, err := c.get(url.Values{
+		"method": {"track.getInfo"},
+		"artist": {artist},
+		"track":  {track},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Track struct {
+			Name   string `json:"name"`
+			Artist struct {
+				Name string `json:"name"`
+			} `json:"artist"`
+			Album struct {
+				Title string `json:"title"`
+			} `json:"album"`
+			Listeners FlexInt `json:"listeners"`
+			Playcount FlexInt `json:"playcount"`
+			Duration  FlexInt `json:"duration"`
+			TopTags   struct {
+				Tag []Tag `json:"tag"`
+			} `json:"toptags"`
+			Wiki struct {
+				Summary string `json:"summary"`
+			} `json:"wiki"`
+		} `json:"track"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	info := &TrackInfo{
+		Name:      resp.Track.Name,
+		Artist:    resp.Track.Artist.Name,
+		Album:     resp.Track.Album.Title,
+		Listeners: int(resp.Track.Listeners),
+		Playcount: int(resp.Track.Playcount),
+		Duration:  int(resp.Track.Duration),
+		Wiki:      stripBioLink(resp.Track.Wiki.Summary),
+	}
+	for _, t := range resp.Track.TopTags.Tag {
+		if t.Name != "" {
+			info.Tags = append(info.Tags, t.Name)
+		}
+	}
+	return info, nil
 }
 
 // GetSimilarArtists returns artists similar to the given one.

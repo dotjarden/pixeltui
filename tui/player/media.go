@@ -1,17 +1,19 @@
-package tui
+package player
 
 import (
 	"bufio"
 	"encoding/json"
 )
 
-// mediaCmd is an OS / hardware transport command observed from mpv.
-type mediaCmd int
+// MediaCmd is an OS / hardware transport command observed from mpv. On the
+// desktop these come from OS media keys / the Now Playing widget; on pocket
+// hardware the GPIO buttons feed this same channel.
+type MediaCmd int
 
 const (
-	mediaNext mediaCmd = iota + 1
-	mediaPrev
-	mediaPlayPause
+	MediaNext MediaCmd = iota + 1
+	MediaPrev
+	MediaPlayPause
 )
 
 // startMediaReader binds mpv's transport keys to named script-messages and
@@ -21,8 +23,8 @@ const (
 //
 // It returns a channel of commands and a stop func. The channel is closed when
 // the connection drops or stop() is called.
-func startMediaReader(socket string) (<-chan mediaCmd, func()) {
-	ch := make(chan mediaCmd, 8)
+func startMediaReader(socket string) (<-chan MediaCmd, func()) {
+	ch := make(chan MediaCmd, 8)
 	conn, err := dialIPC(socket)
 	if err != nil {
 		close(ch)
@@ -64,11 +66,11 @@ func startMediaReader(socket string) (<-chan mediaCmd, func()) {
 			}
 			switch ev.Args[0] {
 			case "px-next":
-				ch <- mediaNext
+				ch <- MediaNext
 			case "px-prev":
-				ch <- mediaPrev
+				ch <- MediaPrev
 			case "px-pp":
-				ch <- mediaPlayPause
+				ch <- MediaPlayPause
 			}
 		}
 	}()

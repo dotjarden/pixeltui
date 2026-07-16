@@ -28,7 +28,15 @@ import (
 	"github.com/dotjarden/pixeltui/tui/library"
 	"github.com/dotjarden/pixeltui/tui/local"
 	"github.com/dotjarden/pixeltui/tui/lyrics"
+	"github.com/dotjarden/pixeltui/tui/player"
+	"context"
+	"encoding/base64"
+	"net/url"
+
+	"github.com/dotjarden/pixeltui/tui/recommend"
 	"github.com/dotjarden/pixeltui/tui/scrobble"
+	"github.com/dotjarden/pixeltui/tui/share"
+	"github.com/dotjarden/pixeltui/tui/source"
 	"github.com/dotjarden/pixeltui/tui/subsonic"
 	"github.com/dotjarden/pixeltui/tui/ytm"
 )
@@ -144,7 +152,7 @@ func ThemeNames() []string {
 
 type (
 	playOKMsg struct {
-		pb  *playback
+		pb  *player.Stream
 		c   engine.Candidate
 		gen int
 	}
@@ -174,7 +182,7 @@ type (
 		err error
 	}
 	mediaMsg struct { // OS / hardware transport command from mpv
-		cmd    mediaCmd
+		cmd    player.MediaCmd
 		gen    int
 		closed bool
 	}
@@ -212,6 +220,11 @@ type (
 		text   string
 		synced []lyrics.Line // timestamped lines (LRCLIB); empty → plain text
 		err    error
+	}
+	trackInfoMsg struct {
+		c       engine.Candidate
+		content string
+		err     error
 	}
 	lyricsTickMsg      struct{}                             // drives smooth synced-lyric scrolling while open
 	browsePlaylistsMsg []browseEntry                        // Subsonic playlists fetched for the browse menu
@@ -292,6 +305,7 @@ type keyMap struct {
 	Next, Tab       key.Binding
 	Shuffle, Repeat key.Binding
 	Sleep, Lyrics   key.Binding
+	Info            key.Binding
 	Auto, Search    key.Binding
 	VolU, VolD      key.Binding
 	// Track verbs — lowercase = highlighted, Shift = now-playing.
@@ -328,6 +342,7 @@ func newKeyMap() keyMap {
 		Repeat:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "repeat")),
 		Sleep:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "sleep")),
 		Lyrics:  key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "lyrics")),
+		Info:    key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "info")),
 		Auto:    key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "autoplay")),
 		Search:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "find")),
 		VolU:    key.NewBinding(key.WithKeys("+", "="), key.WithHelp("+", "vol+")),
@@ -370,7 +385,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.SeekL, k.SeekR, k.Next, k.VolU, k.VolD},
 		{k.Like, k.AddQ, k.Playlist, k.Download, k.Actions},
 		{k.Remove, k.Shuffle, k.Repeat, k.Clr},
-		{k.Search, k.Browse, k.Lyrics, k.Auto, k.Sleep},
+		{k.Search, k.Browse, k.Lyrics, k.Info, k.Auto, k.Sleep},
 		{k.Tab, k.Help, k.Esc, k.Quit},
 	}
 }
@@ -400,10 +415,11 @@ type Config struct {
 	Results       []engine.Candidate
 	Dev           bool
 	Rec           *engine.Recommender
-	URLCache      urlCache            // disk cache for resolved stream URLs (optional)
+	URLCache      player.Cache        // disk cache for resolved stream URLs (optional)
 	Library       *library.Store      // likes/playlists/history/resume (optional)
 	Subsonic      *subsonic.Client    // 2nd source: a Subsonic/Navidrome server (optional)
 	LocalDirs     []string            // 3rd source: local audio folders (optional)
+	Sources       *source.Registry    // central source registry; drives capability-aware UI
 	DownloadDir   string              // where downloaded tracks are saved (optional)
 	Theme         string              // accent theme name (default/ocean/matrix/amber/rose/mono)
 	DataDir       string              // ~/.pixeltui (for caches like the local index)
@@ -414,6 +430,9 @@ type Config struct {
 	Scrobbler     *scrobble.Scrobbler // play submission (nil = not configured)
 	ScrobbleOn    bool                // whether scrobbling is currently enabled
 	Lastfm        *lastfm.Client      // read API for artist info pages (optional)
+	Lyrics        *lyrics.Registry    // lyric sources; nil disables lyrics
+	Recommend     *recommend.Registry // recommendation engines; nil disables autoplay recs
+	Share         *share.Registry    // share-URL resolvers; nil disables share/copy-link actions
 }
 
 // ── model ─────────────────────────────────────────────────────────────────────
@@ -435,7 +454,7 @@ type model struct {
 
 	inflight map[string]bool // tracks in-progress preloads (by trackKey)
 
-	now      *playback
+	now      *player.Stream
 	nowC     engine.Candidate
 	position float64
 	duration float64
@@ -463,6 +482,11 @@ type model struct {
 	scrobbleSent  bool                // this play already scrobbled
 	scrobbleStart time.Time           // when the current play started
 
+	sources   *source.Registry    // central source registry; drives capability-aware actions
+	lyrics    *lyrics.Registry    // lyric sources; nil disables lyrics
+	recommend *recommend.Registry // recommendation engines; nil disables autoplay recs
+	share     *share.Registry    // share-URL resolvers; nil disables share/copy-link actions
+
 	seekStep int // ←/→ seek step in seconds
 
 	// Single-slot undo for destructive ops (queue clear/remove/shuffle and
@@ -482,6 +506,12 @@ type model struct {
 	lyricsSynced   []lyrics.Line           // timestamped lines (karaoke view); nil → plain
 	lyricsCache    map[string]lyricsResult // trackKey → fetched lyrics (prefetch/reopen)
 	posAt          time.Time               // wall-clock when m.position was last set (interpolation)
+
+	showTrackInfo bool
+	trackInfoVP   viewport.Model
+	trackInfoBusy bool
+	trackInfoCand engine.Candidate // track the info overlay is for
+
 	showHelp       bool                    // full shortcuts page
 	showStats      bool                    // listening stats page
 	stats          statResult              // computed when the stats page opens
@@ -558,6 +588,68 @@ func trackKey(c engine.Candidate) string {
 	return strings.ToLower(c.Track) + "|" + strings.ToLower(c.Artist)
 }
 
+// candidateID derives the opaque server stream id from a candidate, mirroring
+// the server's toDTO logic so the TUI can look up source capabilities.
+func candidateID(c engine.Candidate) string {
+	switch {
+	case c.Source == "subsonic":
+		if u, err := url.Parse(c.StreamURL); err == nil {
+			if id := u.Query().Get("id"); id != "" {
+				return "su:" + id
+			}
+		}
+	case c.Source == "local":
+		if c.StreamURL != "" {
+			return "lo:" + base64.URLEncoding.EncodeToString([]byte(c.StreamURL))
+		}
+	case c.VideoID != "":
+		return "yt:" + c.VideoID
+	}
+	return ""
+}
+
+// capabilities returns the server's capability flags for a candidate. When
+// no registry is wired (older callers), it falls back to YouTube = all actions.
+func (m *model) capabilities(c engine.Candidate) source.Capabilities {
+	id := candidateID(c)
+	var caps source.Capabilities
+	if id != "" && m.sources != nil {
+		if p, _, ok := m.sources.SourceFor(id); ok {
+			if got, err := p.Capabilities(context.Background(), source.StreamID(id)); err == nil {
+				caps = got
+			}
+		}
+	}
+	// Unresolved YouTube recommendations have no id yet but still behave like
+	// YouTube for everything except downloading/sharing, which need a video id.
+	if caps == (source.Capabilities{}) && id == "" && (c.Source == "" || c.Source == "youtube") {
+		caps = source.Capabilities{
+			StartStation: true,
+			GoToArtist:   true,
+			GoToAlbum:    true,
+			Radio:        true,
+			Download:     false,
+			Lyrics:       true,
+		}
+	}
+	if caps == (source.Capabilities{}) && strings.HasPrefix(id, "yt:") {
+		caps = source.Capabilities{
+			StartStation: true,
+			GoToArtist:   true,
+			GoToAlbum:    true,
+			Radio:        true,
+			Download:     true,
+			Lyrics:       true,
+		}
+	}
+	// If the source didn't provide a share URL, ask the share registry to
+	// build one (e.g. music.youtube.com/watch?v=... for resolved yt: tracks).
+	if caps.ShareURL == "" && m.share != nil {
+		caps.ShareURL = m.share.ShareURL(c)
+	}
+	return caps
+}
+
 // scrobbleDue reports whether a play at pos (of dur seconds) qualifies for a
 // scrobble: the track is at least 30s long, and playback passed half its
 // length or 4 minutes, whichever comes first. Unknown duration (0) falls back
@@ -617,12 +709,14 @@ func newModel(cfg Config) model {
 		lyricsCache: map[string]lyricsResult{},
 		autoQueue:   true,
 		volume:      -1,
-		hasMPV:      mpvAvailable(),
+		hasMPV:      player.MPVAvailable(),
 		lyricsVP:    viewport.New(0, 0),
+		trackInfoVP: viewport.New(0, 0),
 		header:      cfg.Header,
 		seedTags:    cfg.SeedTags,
 		dev:         cfg.Dev,
 		rec:         cfg.Rec,
+		recommend:   cfg.Recommend,
 		lib:         cfg.Library,
 		sub:         cfg.Subsonic,
 		localDirs:   cfg.LocalDirs,
@@ -638,6 +732,9 @@ func newModel(cfg Config) model {
 		scrobbler:     cfg.Scrobbler,
 		scrobbleOn:    cfg.ScrobbleOn && cfg.Scrobbler != nil,
 		lfm:           cfg.Lastfm,
+		sources:       cfg.Sources,
+		lyrics:        cfg.Lyrics,
+		share:         cfg.Share,
 	}
 	if m.themeName == "" {
 		m.themeName = "default"
@@ -686,7 +783,7 @@ func (m model) Init() tea.Cmd {
 	// no-op without a recommender / Last.fm key, never blocks the UI).
 	if m.header == "FOR YOU" && m.rec != nil &&
 		(m.forYouSeed.Artist != "" || m.forYouSeed.Track != "") {
-		cmds = append(cmds, cmdDiscoverRecs(m.rec, m.forYouSeed.Artist, m.forYouSeed.Track))
+		cmds = append(cmds, m.cmdDiscoverRecs(m.forYouSeed.Artist, m.forYouSeed.Track))
 	}
 	// Async: load the current chart (country if set, else global) for its For You
 	// section. Best-effort; never blocks.
@@ -727,7 +824,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.ended {
 			ended := m.nowC
 			m.resetGapless()
-			m.now.stop()
+			m.now.Stop()
 			m.now = nil
 			m.st.nowKey = ""
 			m.position, m.duration, m.paused = 0, 0, false
@@ -744,7 +841,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.sleepAt.IsZero() && time.Now().After(m.sleepAt) {
 			m.sleepAt = time.Time{}
 			m.autoQueue = false
-			m.now.stop()
+			m.now.Stop()
 			m.now = nil
 			m.st.nowKey = ""
 			m.position, m.duration = 0, 0
@@ -783,7 +880,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A play the user already superseded (pressed Enter again, skipped, …):
 		// discard it so we don't leak the process or clobber the current track.
 		if msg.gen != m.gen {
-			msg.pb.stop()
+			msg.pb.Stop()
 			return m, nil
 		}
 		m.loading = false
@@ -811,8 +908,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Warm the next couple of queued tracks so auto-advance is gapless.
 		cmds = append(cmds, m.preloadQueue(2))
 		// Prefetch lyrics in the background so pressing `y` is instant.
-		if _, ok := m.lyricsCache[m.st.nowKey]; !ok {
-			cmds = append(cmds, cmdLyrics(msg.c, m.st.nowKey))
+		if _, ok := m.lyricsCache[m.st.nowKey]; !ok && m.capabilities(msg.c).Lyrics {
+			cmds = append(cmds, m.cmdLyrics(msg.c, m.st.nowKey))
 		}
 		// If the lyrics overlay is open, refetch for the new track.
 		if m.showLyrics {
@@ -844,13 +941,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.cmd {
-		case mediaNext:
+		case player.MediaNext:
 			return m, m.advanceForce() // bumps gen + plays next → resubscribes
-		case mediaPrev:
+		case player.MediaPrev:
 			m.now.Restart()
 			m.position, m.posAt = 0, time.Now()
 			return m, waitMedia(m.now, m.gen)
-		case mediaPlayPause:
+		case player.MediaPlayPause:
 			m.now.Pause()
 			m.paused = !m.paused
 			m.st.paused = m.paused
@@ -990,7 +1087,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.st.focusQueue = false
 		m.staticList = true // entity page: "/" filters it
 		m.header = "ARTIST · " + p.Name
-		m.status, m.isErr = artistBlurb(msg.info), false
+		blurb := artistBlurb(msg.info)
+		if p.Description != "" {
+			if blurb == "" {
+				blurb = truncate(p.Description, m.width-8)
+			} else {
+				blurb = truncate(p.Description, m.width-len(blurb)-8) + "  ·  " + blurb
+			}
+		}
+		m.status, m.isErr = blurb, false
 		// Land on the first real track and warm the top songs.
 		for i, it := range items {
 			if _, ok := it.(trackItem); ok {
@@ -1023,9 +1128,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, c := range d.Tracks {
 			total += c.DurationSec
 		}
-		blurb := fmt.Sprintf("%d tracks", len(d.Tracks))
+		var parts []string
+		if d.IsExplicit {
+			parts = append(parts, "E")
+		}
+		parts = append(parts, fmt.Sprintf("%d tracks", len(d.Tracks)))
 		if total > 0 {
-			blurb += fmt.Sprintf(" · %d min", (total+30)/60)
+			parts = append(parts, fmt.Sprintf("%d min", (total+30)/60))
+		}
+		blurb := strings.Join(parts, " · ")
+		if d.Description != "" {
+			desc := truncate(d.Description, m.width-len(blurb)-20)
+			if desc != "" {
+				blurb = desc + "  ·  " + blurb
+			}
 		}
 		m.status, m.isErr = blurb+"  ·  e queue all · esc back", false
 		return m, m.preloadResultsTop(3)
@@ -1110,6 +1226,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lyricsVP.SetContent(msg.text)
 		}
 		m.lyricsVP.GotoTop()
+		return m, nil
+
+	case trackInfoMsg:
+		if !m.showTrackInfo {
+			return m, nil
+		}
+		m.trackInfoBusy = false
+		if msg.err != nil {
+			m.trackInfoVP.SetContent("  Couldn't load track info:\n  " + firstLine(msg.err.Error()))
+		} else {
+			m.trackInfoVP.SetContent(msg.content)
+		}
+		m.trackInfoVP.GotoTop()
 		return m, nil
 
 	case lyricsTickMsg:
@@ -1910,6 +2039,20 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Track info overlay: i/esc close, q quits, j/k or up/down scroll.
+	if m.showTrackInfo {
+		switch {
+		case key.Matches(msg, k.Info), key.Matches(msg, k.Esc):
+			m.showTrackInfo = false
+			return m, nil
+		case key.Matches(msg, k.Quit):
+			return m, tea.Quit
+		}
+		var cmd tea.Cmd
+		m.trackInfoVP, cmd = m.trackInfoVP.Update(msg)
+		return m, cmd
+	}
+
 	switch {
 
 	case key.Matches(msg, k.Quit):
@@ -2078,6 +2221,8 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, k.Lyrics):
 		return m.toggleLyrics()
+	case key.Matches(msg, k.Info):
+		return m.toggleTrackInfo()
 	case key.Matches(msg, k.Auto):
 		m.autoQueue = !m.autoQueue
 		if m.autoQueue {
@@ -2204,8 +2349,8 @@ func (m model) downloadCand(c engine.Candidate, ok bool) (tea.Model, tea.Cmd) {
 		m.status, m.isErr = "No download folder — run 'pixeltui setup' to set one", true
 		return m, nil
 	}
-	if !download.Downloadable(c) {
-		m.status, m.isErr = "Only YouTube tracks can be downloaded (this is already a file/stream)", true
+	if !m.capabilities(c).Download {
+		m.status, m.isErr = "This source doesn't support downloads", true
 		return m, nil
 	}
 	m.status, m.isErr = "Downloading “"+truncate(c.Track, 30)+"”…", false
@@ -2236,6 +2381,10 @@ func (m model) stationCand(c engine.Candidate, ok bool) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if !m.capabilities(c).StartStation {
+		m.status, m.isErr = "This source doesn't support stations", true
+		return m, nil
+	}
 	m.autoQueue = true
 	if len(m.queue.Items()) > 0 {
 		m.snapshotQueue("clear") // station replaces the queue; keep it undoable
@@ -2261,21 +2410,25 @@ func (m model) openActions() (tea.Model, tea.Cmd) {
 	if m.st.likedKeys[trackKey(c)] {
 		like = "Unlike"
 	}
+	caps := m.capabilities(c)
 	items := []actionEntry{
 		{"Play now", "play"},
 		{like, "like"},
 		{"Add to queue", "queue"},
 		{"Play next", "next"},
 		{"Add to playlist…", "playlist"},
-		{"Start station", "station"},
+		{"Credits & info", "info"},
 	}
-	if c.Artist != "" {
+	if caps.StartStation {
+		items = append(items, actionEntry{"Start station", "station"})
+	}
+	if caps.GoToArtist && c.Artist != "" {
 		items = append(items, actionEntry{"Go to artist — " + truncate(c.Artist, 28), "goartist"})
 	}
-	if c.Album != "" {
+	if caps.GoToAlbum && c.Album != "" {
 		items = append(items, actionEntry{"Go to album — " + truncate(c.Album, 28), "goalbum"})
 	}
-	if download.Downloadable(c) {
+	if caps.Download {
 		items = append(items, actionEntry{"Download", "download"})
 	}
 	items = append(items, actionEntry{"Mute artist", "dislike"})
@@ -2310,6 +2463,8 @@ func (m model) selectAction() (tea.Model, tea.Cmd) {
 		return m.addToPlaylistFor(c, true)
 	case "station":
 		return m.stationCand(c, true)
+	case "info":
+		return m.toggleTrackInfo()
 	case "goartist":
 		m.pushBack()
 		m.loading, m.status, m.isErr = true, "", false
@@ -2480,7 +2635,7 @@ func (m model) stationFromBrowse() (tea.Model, tea.Cmd) {
 	m.aqPending = true
 	m.loading = true
 	m.status, m.isErr = fmt.Sprintf("Station from “%s” — blending %d seeds…", name, len(seeds)), false
-	return m, tea.Batch(cmdMultiStation(m.rec, seeds), m.spin.Tick)
+	return m, tea.Batch(m.cmdMultiStation(seeds), m.spin.Tick)
 }
 
 // sampleSeeds picks up to n distinct random tracks as station seeds.
@@ -2536,7 +2691,7 @@ func (m model) selectBrowse() (tea.Model, tea.Cmd) {
 		m.rebuildForYou() // sections from local + cached recs/chart
 		cmds := []tea.Cmd{m.preloadResultsTop(3)}
 		if !m.forYouRecsTried && m.rec != nil && len(m.fyLocal) > 0 {
-			cmds = append(cmds, cmdDiscoverRecs(m.rec, m.fyLocal[0].Artist, m.fyLocal[0].Track))
+			cmds = append(cmds, m.cmdDiscoverRecs(m.fyLocal[0].Artist, m.fyLocal[0].Track))
 		}
 		if len(m.fyChart) == 0 && (m.chartsGlobal || m.chartsCountry != "") {
 			cmds = append(cmds, cmdForYouChart(m.charts, m.chartsCountry, m.chartsGlobal))
@@ -2715,11 +2870,15 @@ func (m model) toggleLyrics() (tea.Model, tea.Cmd) {
 		m.showLyrics = false
 		return m, nil
 	}
-	// LRCLIB matches on artist/track, so any playing track qualifies (no need
-	// for a YouTube id — Subsonic/local tracks get lyrics too).
+	// LRCLIB matches on artist/track, but the provider must advertise lyrics
+	// support before we try (local tracks, for example, may not want a lookup).
 	if m.now == nil || (m.nowC.Track == "" && m.nowC.Artist == "") {
 		m.status = "Play a track to see its lyrics"
 		m.isErr = false
+		return m, nil
+	}
+	if !m.capabilities(m.nowC).Lyrics {
+		m.status, m.isErr = "This source doesn't expose lyrics", true
 		return m, nil
 	}
 	m.showLyrics = true
@@ -2745,7 +2904,32 @@ func (m model) toggleLyrics() (tea.Model, tea.Cmd) {
 	m.lyricsSynced = nil
 	m.lyricsVP.SetContent("")
 	m.lyricsVP.GotoTop()
-	return m, tea.Batch(cmdLyrics(m.nowC, key), m.spin.Tick, lyricsTick())
+	return m, tea.Batch(m.cmdLyrics(m.nowC, key), m.spin.Tick, lyricsTick())
+}
+
+// toggleTrackInfo opens/closes the credits & info overlay for the selected or
+// now-playing track. It composes Last.fm stats, local listening history, and
+// source metadata without needing the HTTP server.
+func (m model) toggleTrackInfo() (tea.Model, tea.Cmd) {
+	if m.showTrackInfo {
+		m.showTrackInfo = false
+		return m, nil
+	}
+	c, ok := m.selected()
+	if !ok {
+		c, ok = m.verbTarget(true)
+	}
+	if !ok || (c.Track == "" && c.Artist == "") {
+		m.status = "Select or play a track to see its info"
+		m.isErr = false
+		return m, nil
+	}
+	m.showTrackInfo = true
+	m.trackInfoBusy = true
+	m.trackInfoCand = c
+	m.trackInfoVP.SetContent("")
+	m.trackInfoVP.GotoTop()
+	return m, tea.Batch(m.cmdTrackInfo(m.lfm, m.lib, c), m.spin.Tick)
 }
 
 // lyricsTick re-renders the synced lyrics overlay smoothly (between 500ms polls).
@@ -2795,7 +2979,7 @@ func (m *model) resetGapless() {
 // next (preloaded) track, and detects when mpv crossed the boundary into it.
 // Called from every poll with the playlist entry id mpv is currently on.
 func (m *model) gaplessSync(curID int) tea.Cmd {
-	if m.now == nil || !m.now.canControl() {
+	if m.now == nil || !m.now.CanControl() {
 		return nil
 	}
 	// mpv advanced into the appended track on its own — no respawn needed.
@@ -2871,17 +3055,16 @@ func (m *model) gaplessAdvanced() tea.Cmd {
 	}
 	// Older mpv ignores per-file options on append — refresh the OS widget
 	// title over IPC either way (same value when the per-file option stuck).
-	if m.now != nil && m.now.socket != "" {
-		sock, title := m.now.socket, next.Track+" — "+next.Artist
-		go ipcCmd(sock, "set_property", "force-media-title", title)
+	if m.now != nil {
+		go m.now.SetTitle(next.Track + " — " + next.Artist)
 	}
 
 	cmds := []tea.Cmd{m.preloadQueue(2)}
 	if next.ArtURL != "" && m.artWidth() > 0 {
 		cmds = append(cmds, cmdArt(next.ArtURL, artCols, artRows))
 	}
-	if _, ok := m.lyricsCache[m.st.nowKey]; !ok {
-		cmds = append(cmds, cmdLyrics(next, m.st.nowKey))
+	if _, ok := m.lyricsCache[m.st.nowKey]; !ok && m.capabilities(next).Lyrics {
+		cmds = append(cmds, m.cmdLyrics(next, m.st.nowKey))
 	}
 	if m.showLyrics {
 		m.lyricsBusy = true
@@ -2911,13 +3094,11 @@ func (m *model) advanceForce() tea.Cmd {
 	return nil
 }
 
-// refill pulls YouTube Music radio (via the now-playing video id) first, then
-// falls back to the local recommender.
+// refill asks the recommendation registry for the next batch of tracks seeded
+// by the current candidate. The registry chooses the best engine (YouTube radio
+// for yt: tracks, Last.fm for plain artist/track seeds, etc.).
 func (m model) refill(seed engine.Candidate) tea.Cmd {
-	if seed.VideoID != "" {
-		return cmdRadio(seed.VideoID)
-	}
-	return cmdRecommend(m.rec, seed.Artist, seed.Track)
+	return m.cmdAutoQueue(seed)
 }
 
 func (m *model) preload(c engine.Candidate) tea.Cmd {
@@ -3171,6 +3352,13 @@ func (m *model) layout() {
 		m.lyricsVP.Height = 1
 	}
 
+	// Track info overlay uses the same body area.
+	m.trackInfoVP.Width = m.width - 4
+	m.trackInfoVP.Height = contentH - 3
+	if m.trackInfoVP.Height < 1 {
+		m.trackInfoVP.Height = 1
+	}
+
 	// Progress bar width for the animated transport bar.
 	pw := m.width - 26
 	if m.art != nil {
@@ -3216,6 +3404,8 @@ func (m model) View() string {
 		body = m.viewActions()
 	case m.showLyrics:
 		body = m.viewLyrics()
+	case m.showTrackInfo:
+		body = m.viewTrackInfo()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.viewNowBar(),
@@ -3547,6 +3737,7 @@ func (m model) viewHelpPage() string {
 		{"n", "next track"},
 		{"+ −", "volume up / down"},
 		{"y", "lyrics (synced)"},
+		{"i", "track info / credits"},
 		{"[ ] 0", "nudge / reset lyric sync"},
 		{"o O", "station: selected / playing"},
 	})
@@ -3557,7 +3748,7 @@ func (m model) viewHelpPage() string {
 		{"p P", "add to playlist"},
 		{"d D", "download"},
 		{"x X", "mute artist (X also skips)"},
-		{".", "actions · go to artist/album"},
+		{".", "actions · go to artist/album/info"},
 	})
 	search := section("SEARCH   (/ online · ' filter only)", []row{
 		{"type", "filter the list live"},
@@ -3612,6 +3803,19 @@ func (m model) viewHelpPage() string {
 	inner := lipgloss.JoinVertical(lipgloss.Left,
 		stTitle.Render("⌨  KEYBOARD SHORTCUTS"), "", body, "", notes, "", footer)
 	return stPaneFocus.Width(m.width-2).Height(contentH-2).Padding(0, 1).Render(inner)
+}
+
+func (m model) viewTrackInfo() string {
+	contentH := m.height - nowBarH - footerH
+	if contentH < 4 {
+		contentH = 4
+	}
+	title := stTitle.Render("TRACK INFO") + "  " + stArtist.Render(truncate(m.trackInfoCand.Track+" — "+m.trackInfoCand.Artist, m.width-22))
+	if m.trackInfoBusy {
+		title = m.spin.View() + " " + stDim.Render("loading track info…")
+	}
+	inner := lipgloss.JoinVertical(lipgloss.Left, title, m.trackInfoVP.View())
+	return stPaneFocus.Width(m.width - 2).Height(contentH - 2).Render(inner)
 }
 
 func (m model) viewBrowse() string {
@@ -4036,7 +4240,7 @@ func cmdSubsonicStarred(sub *subsonic.Client) tea.Cmd {
 func cmdDownload(c engine.Candidate, dir string) tea.Cmd {
 	return func() tea.Msg {
 		url := "https://music.youtube.com/watch?v=" + c.VideoID
-		_, err := download.Track(ytdlpPath(), url, dir)
+		_, err := download.Track(player.YtdlpPath(), url, dir)
 		return downloadDoneMsg{track: c.Track, err: err}
 	}
 }
@@ -4133,7 +4337,7 @@ func cmdArt(url string, cols, rows int) tea.Cmd {
 // ── entry ─────────────────────────────────────────────────────────────────────
 
 func Run(cfg Config) {
-	streamCache = cfg.URLCache // enable disk caching of resolved stream URLs
+	player.SetCache(cfg.URLCache) // enable disk caching of resolved stream URLs
 	if cfg.Theme != "" {
 		applyTheme(cfg.Theme)
 	}
@@ -4152,7 +4356,7 @@ func Run(cfg Config) {
 		fmt.Fprintln(os.Stderr, "tui:", err)
 	}
 	if fm, ok := final.(model); ok {
-		fm.now.stop()
+		fm.now.Stop()
 		// Persist the queue so "Up Next" survives restarts.
 		if fm.lib != nil {
 			items := fm.queue.Items()
@@ -4163,7 +4367,7 @@ func Run(cfg Config) {
 			fm.lib.SaveSession(library.Session{Queue: q, NowPlaying: fm.nowC, PositionSec: fm.position})
 		}
 	}
-	cleanupCovers() // remove generated pixelated cover PNGs
+	player.CleanupCovers() // remove generated pixelated cover PNGs
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

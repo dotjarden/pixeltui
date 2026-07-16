@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dotjarden/pixeltui/tui/engine"
+	"github.com/dotjarden/pixeltui/tui/source"
 	"github.com/dotjarden/pixeltui/tui/ytm"
 )
 
@@ -21,14 +23,28 @@ var (
 	recsCache  = newTTLCache(30*time.Minute, 8)
 )
 
-// handleRadio returns YouTube Music's watch-playlist radio for a track —
-// the seed for stations and autoplay queueing.
-// Query: id (yt:<videoID>), n (default 25), exclude (comma-separated artists
+// handleRadio returns a source-specific radio/station for a track.
+// Query: id (source-prefixed), n (default 25), exclude (comma-separated artists
 // to mute, same as the TUI's x key).
 func (s *server) handleRadio(w http.ResponseWriter, r *http.Request) {
-	kind, vid, ok := splitID(r.URL.Query().Get("id"))
-	if !ok || kind != "yt" {
-		http.Error(w, "radio needs a yt: track id", http.StatusBadRequest)
+	id := r.URL.Query().Get("id")
+	var provider source.Provider
+	var seed string
+	var ok bool
+	if s.cfg.Sources != nil {
+		provider, _, ok = s.cfg.Sources.SourceFor(id)
+		if ok {
+			seed = source.StreamID(id)
+		}
+	}
+	if !ok {
+		kind, vid, ok2 := splitID(id)
+		if ok2 && kind == "yt" {
+			provider, seed, ok = nil, vid, true
+		}
+	}
+	if !ok {
+		http.Error(w, "radio needs a source-prefixed track id", http.StatusBadRequest)
 		return
 	}
 	n, _ := strconv.Atoi(r.URL.Query().Get("n"))
@@ -36,36 +52,49 @@ func (s *server) handleRadio(w http.ResponseWriter, r *http.Request) {
 		n = 25
 	}
 	exclude := r.URL.Query().Get("exclude")
-	key := vid + "|" + strconv.Itoa(n) + "|" + strings.ToLower(exclude)
+	key := seed + "|" + strconv.Itoa(n) + "|" + strings.ToLower(exclude)
 	if v, ok := radioCache.get(key); ok {
 		writeJSON(w, v)
 		return
 	}
-	cands, err := ytm.Radio(vid, n)
+
+	var (
+		cands []engine.Candidate
+		err   error
+	)
+	if provider != nil {
+		cands, err = provider.Radio(r.Context(), seed, n, nil)
+	} else {
+		cands, err = ytm.Radio(seed, n)
+	}
 	if err != nil {
+		if errors.Is(err, source.ErrNotSupported) {
+			http.Error(w, "radio not supported for this source", http.StatusNotImplemented)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	// The seed video itself usually leads the watch playlist — drop it.
+	// Drop the seed if it appears first (YouTube watch playlists usually do).
 	out := cands[:0]
 	for _, c := range cands {
-		if c.VideoID != vid {
+		if c.VideoID != seed {
 			out = append(out, c)
 		}
 	}
 	out = filterExcluded(out, exclude)
-	resp := map[string]any{"tracks": toDTOs(out)}
+	resp := map[string]any{"tracks": s.toDTOsWithCaps(out)}
 	radioCache.put(key, resp)
 	writeJSON(w, resp)
 }
 
-// handleRecommend returns recommendations from pixeltui's own engine.
+// handleRecommend returns recommendations from the registered recommend engines.
 // Seeds: explicit ?artist=&track= when given; otherwise up to 4 random liked
 // tracks from the shared library (the TUI's blended-station behavior).
-// Results are resolved to playable YouTube tracks. Query: artist, track, n.
+// Results are resolved to playable tracks. Query: artist, track, n.
 func (s *server) handleRecommend(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.Rec == nil {
-		http.Error(w, "recommendations need a Last.fm key on the server (pixeltui setup)", http.StatusServiceUnavailable)
+	if s.cfg.Recommend == nil {
+		http.Error(w, "recommendations are not configured on the server", http.StatusServiceUnavailable)
 		return
 	}
 	q := r.URL.Query()
@@ -113,20 +142,39 @@ func (s *server) handleRecommend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cands, err := s.cfg.Rec.RecommendMulti(seeds, n)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+	ctx := r.Context()
+	seen := map[string]bool{}
+	var all []engine.Candidate
+	for _, seed := range seeds {
+		c := engine.Candidate{Artist: seed.Artist, Track: seed.Track}
+		if !s.cfg.Recommend.CanSeed(ctx, c) {
+			continue
+		}
+		res, err := s.cfg.Recommend.Recommend(ctx, c, n/len(seeds)+4, nil)
+		if err != nil {
+			continue
+		}
+		for _, cand := range res {
+			k := strings.ToLower(cand.Track + "|" + cand.Artist)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			all = append(all, cand)
+		}
 	}
-	cands = filterExcluded(cands, exclude)
-	resolveToSongs(cands)
-	playable := cands[:0]
-	for _, c := range cands {
+	all = filterExcluded(all, exclude)
+	resolveToSongs(all)
+	playable := all[:0]
+	for _, c := range all {
 		if c.VideoID != "" {
 			playable = append(playable, c)
 		}
 	}
-	resp := map[string]any{"tracks": toDTOs(playable)}
+	if len(playable) > n {
+		playable = playable[:n]
+	}
+	resp := map[string]any{"tracks": s.toDTOsWithCaps(playable)}
 	recsCache.put(key, resp)
 	writeJSON(w, resp)
 }

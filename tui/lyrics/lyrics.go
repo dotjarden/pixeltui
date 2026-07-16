@@ -1,29 +1,22 @@
-// Package lyrics fetches song lyrics from LRCLIB (https://lrclib.net) — a free,
-// open, no-auth lyrics database that provides synced (timestamped) and plain
-// lyrics. Pure stdlib; no API key required.
+// Package lyrics fetches song lyrics through pluggable providers.
+//
+// A Provider can be any backend: LRCLIB, YouTube Music, a local file, etc.
+// A Registry holds registered providers and tries each in priority order.
+// Core code asks the registry for lyrics rather than hardcoding LRCLIB + YTM.
+//
+// The default package-level Fetch function keeps old callers working with a
+// default registry that includes LRCLIB and (if available) YouTube Music.
 package lyrics
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/url"
+	"errors"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 )
 
-// userAgent identifies pixeltui to LRCLIB, as the project requests.
-const userAgent = "pixeltui (https://github.com/dotjarden/pixeltui)"
-
-// LRCLIB can be slow (several seconds of TTFB when its server is loaded). The
-// worst-case win comes from running get+search CONCURRENTLY (a miss costs ~one
-// timeout, not two), not from a short cap — measured TTFB is ~7s during a slow
-// spell, so an over-aggressive timeout would drop valid-but-slow lyrics. 8s
-// catches those while concurrency keeps the total bounded.
-var client = &http.Client{Timeout: 8 * time.Second}
+// ErrNotFound means no registered provider returned lyrics for the track.
+var ErrNotFound = errors.New("lyrics not found")
 
 // Line is one synced lyric line at time T (seconds).
 type Line struct {
@@ -42,139 +35,80 @@ func (r Result) Empty() bool {
 	return len(r.Synced) == 0 && strings.TrimSpace(r.Plain) == ""
 }
 
-// Fetch looks up lyrics by artist/track, using album and duration (when known)
-// to disambiguate. It prefers an exact match (get) and falls back to search —
-// but runs both LRCLIB calls CONCURRENTLY: when LRCLIB is slow, a sequential
-// get→search doubled the wait on a miss (~2× the timeout). get's result wins
-// when it's a hit and the still-pending search is cancelled, so the worst case
-// is one timeout, not two. No auth, no API key.
+// Provider is one lyrics source.
+type Provider interface {
+	// Name returns a short identifier, e.g. "lrclib", "youtube".
+	Name() string
+
+	// Priority orders providers within a registry. Higher values run first.
+	Priority() int
+
+	// Fetch looks up lyrics for a track. album may be empty; duration is in
+	// seconds and may be 0. Implementations should return an error only on a
+	// real failure; "track not found" can be returned as an empty Result.
+	Fetch(ctx context.Context, artist, track, album string, durationSec int) (Result, error)
+}
+
+// Registry holds lyrics providers and queries them in priority order.
+// Zero value is usable but empty.
+type Registry struct {
+	providers []Provider
+}
+
+// NewRegistry creates an empty registry. Use Register to add providers.
+func NewRegistry() *Registry {
+	return &Registry{}
+}
+
+// Register adds a provider. Providers are sorted by priority (descending)
+// so the highest priority is tried first.
+func (r *Registry) Register(p Provider) {
+	r.providers = append(r.providers, p)
+	sort.Slice(r.providers, func(i, j int) bool {
+		return r.providers[i].Priority() > r.providers[j].Priority()
+	})
+}
+
+// Providers returns the registered providers in priority order.
+func (r *Registry) Providers() []Provider {
+	return append([]Provider(nil), r.providers...)
+}
+
+// Fetch tries each registered provider in priority order and returns the first
+// non-empty result. If no provider is registered, or none find lyrics, it
+// returns ErrNotFound.
+func (r *Registry) Fetch(ctx context.Context, artist, track, album string, durationSec int) (Result, error) {
+	if r == nil {
+		return Result{}, ErrNotFound
+	}
+	for _, p := range r.providers {
+		res, err := p.Fetch(ctx, artist, track, album, durationSec)
+		if err != nil {
+			continue // real failure: try next provider
+		}
+		if !res.Empty() {
+			return res, nil
+		}
+	}
+	return Result{}, ErrNotFound
+}
+
+// defaultRegistry is the package-level registry used by Fetch(). It is
+// initialized lazily so callers can override it in tests or main.go.
+var defaultRegistry = NewRegistry()
+
+// SetDefault replaces the package-level default registry. Main programs use
+// this once after constructing their real registry.
+func SetDefault(reg *Registry) {
+	if reg == nil {
+		defaultRegistry = NewRegistry()
+		return
+	}
+	defaultRegistry = reg
+}
+
+// Fetch uses the package-level default registry. It exists for backwards
+// compatibility; new code should create a Registry and call Registry.Fetch.
 func Fetch(artist, track, album string, durationSec int) (Result, error) {
-	if strings.TrimSpace(artist) == "" && strings.TrimSpace(track) == "" {
-		return Result{}, fmt.Errorf("no track info")
-	}
-
-	// Exact get — most accurate (duration disambiguates remixes/live versions).
-	q := url.Values{}
-	q.Set("artist_name", artist)
-	q.Set("track_name", track)
-	if album != "" {
-		q.Set("album_name", album)
-	}
-	if durationSec > 0 {
-		q.Set("duration", strconv.Itoa(durationSec))
-	}
-	// Search fallback by artist+track.
-	s := url.Values{}
-	s.Set("artist_name", artist)
-	s.Set("track_name", track)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	getCh := make(chan Result, 1)
-	go func() {
-		var got apiLyrics
-		if getJSON(ctx, "https://lrclib.net/api/get?"+q.Encode(), &got) {
-			getCh <- toResult(got)
-			return
-		}
-		getCh <- Result{}
-	}()
-	searchCh := make(chan Result, 1)
-	go func() {
-		var hits []apiLyrics
-		if getJSON(ctx, "https://lrclib.net/api/search?"+s.Encode(), &hits) {
-			for _, h := range hits {
-				if r := toResult(h); !r.Empty() {
-					searchCh <- r
-					return
-				}
-			}
-		}
-		searchCh <- Result{}
-	}()
-
-	if g := <-getCh; !g.Empty() {
-		cancel() // exact hit — drop the in-flight search
-		return g, nil
-	}
-	if r := <-searchCh; !r.Empty() {
-		return r, nil
-	}
-	return Result{}, nil
-}
-
-type apiLyrics struct {
-	SyncedLyrics string `json:"syncedLyrics"`
-	PlainLyrics  string `json:"plainLyrics"`
-}
-
-func toResult(a apiLyrics) Result {
-	return Result{Synced: parseLRC(a.SyncedLyrics), Plain: strings.TrimSpace(a.PlainLyrics)}
-}
-
-func getJSON(ctx context.Context, u string, v interface{}) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-	return json.NewDecoder(resp.Body).Decode(v) == nil
-}
-
-// parseLRC parses LRC-format text ("[mm:ss.xx] words") into sorted, timestamped
-// lines. Non-timestamp tags (e.g. [ar:...]) and blank lines are ignored.
-func parseLRC(s string) []Line {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	var out []Line
-	for _, raw := range strings.Split(s, "\n") {
-		line := strings.TrimRight(raw, "\r")
-		var stamps []float64
-		rest := line
-		for strings.HasPrefix(rest, "[") {
-			end := strings.IndexByte(rest, ']')
-			if end < 0 {
-				break
-			}
-			if t, ok := parseStamp(rest[1:end]); ok {
-				stamps = append(stamps, t)
-				rest = rest[end+1:]
-				continue
-			}
-			break // metadata tag, not a timestamp
-		}
-		text := strings.TrimSpace(rest)
-		for _, t := range stamps {
-			out = append(out, Line{T: t, Text: text})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].T < out[j].T })
-	return out
-}
-
-// parseStamp parses "mm:ss.xx" or "mm:ss" into seconds.
-func parseStamp(s string) (float64, bool) {
-	colon := strings.IndexByte(s, ':')
-	if colon < 0 {
-		return 0, false
-	}
-	mm, err := strconv.Atoi(strings.TrimSpace(s[:colon]))
-	if err != nil {
-		return 0, false
-	}
-	sec, err := strconv.ParseFloat(strings.TrimSpace(s[colon+1:]), 64)
-	if err != nil {
-		return 0, false
-	}
-	return float64(mm)*60 + sec, true
+	return defaultRegistry.Fetch(context.Background(), artist, track, album, durationSec)
 }

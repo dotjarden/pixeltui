@@ -1,6 +1,6 @@
 //go:build windows
 
-package tui
+package player
 
 import (
 	"fmt"

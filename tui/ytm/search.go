@@ -63,9 +63,11 @@ func SearchAlbums(query string, limit int) ([]Album, error) {
 
 // AlbumDetail is a fully-parsed album page: ordered tracks + header metadata.
 type AlbumDetail struct {
-	Album  Album // input album, with Year filled from the page when missing
-	Tracks []engine.Candidate
-	ArtURL string // album cover (largest header thumbnail)
+	Album       Album // input album, with Year filled from the page when missing
+	Tracks      []engine.Candidate
+	ArtURL      string // album cover (largest header thumbnail)
+	Description string
+	IsExplicit  bool
 }
 
 // BrowseAlbum fetches an album page by browse id and parses its tracklist and
@@ -80,12 +82,16 @@ func BrowseAlbum(a Album, limit int) (*AlbumDetail, error) {
 		return nil, fmt.Errorf("album: no tracks found")
 	}
 	d := &AlbumDetail{Album: a, Tracks: out}
-	// Header metadata: year (when search didn't carry one) and cover art. New
-	// album layouts nest the header inside contents, so find it wherever it is.
-	if d.Album.Year == "" {
-		if h := findHeader(root); h != nil {
+	// Header metadata: year (when search didn't carry one), explicit badge, and
+	// cover art. New album layouts nest the header inside contents.
+	if h := findHeader(root); h != nil {
+		if d.Album.Year == "" {
 			d.Album.Year = yearFromRuns(dig(h, "subtitle", "runs"))
 		}
+		d.IsExplicit = explicitFromHeader(h)
+	}
+	if d.Description == "" {
+		d.Description = albumDescription(root)
 	}
 	d.ArtURL = thumbsBest(dig(root, "background", "musicThumbnailRenderer", "thumbnail", "thumbnails"))
 	if d.ArtURL == "" {
@@ -98,6 +104,47 @@ func BrowseAlbum(a Album, limit int) (*AlbumDetail, error) {
 		}
 	}
 	return d, nil
+}
+
+// albumDescription returns the first musicDescriptionShelfRenderer description
+// text found on an album page (YTM sometimes surfaces a short description).
+func albumDescription(root interface{}) string {
+	var text string
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		if text != "" {
+			return
+		}
+		switch t := v.(type) {
+		case map[string]interface{}:
+			if d, ok := t["musicDescriptionShelfRenderer"].(map[string]interface{}); ok {
+				text = cleanText(runText(dig(d, "description", "runs")))
+				return
+			}
+			for _, c := range t {
+				walk(c)
+			}
+		case []interface{}:
+			for _, c := range t {
+				walk(c)
+			}
+		}
+	}
+	walk(root)
+	return text
+}
+
+// explicitFromHeader checks the header's badges for the explicit-content badge.
+func explicitFromHeader(h map[string]interface{}) bool {
+	badges, _ := h["badges"].([]interface{})
+	for _, b := range badges {
+		if bm, ok := b.(map[string]interface{}); ok {
+			if icon := str(dig(bm, "musicInlineBadgeRenderer", "icon", "iconType")); icon == "MUSIC_EXPLICIT_BADGE" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // findHeader locates the album/playlist detail header renderer anywhere in the

@@ -6,10 +6,7 @@ import (
 	"image"
 	"image/color"
 	_ "image/jpeg"
-	"image/png"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -59,32 +56,6 @@ func renderArt(artURL string, cols, rows int) ([]string, error) {
 		lines[row] = sb.String()
 	}
 	return lines, nil
-}
-
-// pixelatedArtFile makes a deliberately chunky, terminal-style PNG of the album
-// art: downscale to a tiny grid (same blocky look we render in the TUI), then
-// nearest-neighbor upscale so each "pixel" is a big square. Written to a temp
-// PNG for mpv's --cover-art-files so the OS Now Playing widget shows the same
-// pixelated art — just for the lol. Returns the file path (caller deletes it).
-func pixelatedArtFile(artURL string, grid, out int) (string, error) {
-	src, err := fetchImage(artURL)
-	if err != nil {
-		return "", err
-	}
-	small := resizeNearest(src, grid, grid) // crush detail
-	big := resizeNearest(small, out, out)   // blow it back up → chunky pixels
-
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("pixeltui-cover-%d.png", time.Now().UnixNano()))
-	f, err := os.Create(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if err := png.Encode(f, big); err != nil {
-		os.Remove(path) //nolint:errcheck
-		return "", err
-	}
-	return path, nil
 }
 
 // ── image helpers ─────────────────────────────────────────────────────────────

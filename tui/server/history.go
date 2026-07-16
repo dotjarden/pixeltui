@@ -96,7 +96,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]struct{}{}
 	out := make([]historyDTO, 0, limit)
 	for _, l := range listens {
-		d, ok := toDTO(l.Candidate)
+		d, ok := s.toDTOWithCaps(l.Candidate)
 		if !ok {
 			continue
 		}
@@ -121,7 +121,8 @@ type statsEntry struct {
 	Artist   string `json:"artist,omitempty"` // set for tracks
 	Plays    int    `json:"plays"`
 	Art      string `json:"art,omitempty"`
-	StreamID string `json:"id,omitempty"` // playable id for tracks, when known
+	StreamID string `json:"id,omitempty"`   // playable id for tracks, when known
+	Source   string `json:"source,omitempty"` // source backend id (local, subsonic, youtube, …)
 }
 
 // handleStats computes listening stats from the shared history — the same
@@ -175,8 +176,9 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 			t.plays++
 		} else if c.Track != "" {
 			e := statsEntry{Name: c.Track, Artist: c.Artist, Art: c.ArtURL}
-			if d, ok := toDTO(c); ok {
+			if d, ok := s.toDTOWithCaps(c); ok {
 				e.StreamID = d.ID
+				e.Source = d.Source
 				if e.Art == "" {
 					e.Art = d.Art
 				}

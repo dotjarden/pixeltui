@@ -136,8 +136,7 @@ if [ "$skip_doctor" != "1" ]; then
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────────────
-printf "\n${GREEN}${BOLD}  ✓ launch-ready${RESET}\n\n"
-printf "  Next (optional):\n"
-printf "    ${BOLD}pixeltui setup${RESET}    add Last.fm key, Subsonic, folders\n"
-printf "    ${BOLD}pixeltui${RESET}          launch the player\n\n"
+printf "\n${GREEN}${BOLD}  ✓ installed${RESET}\n\n"
+printf "  Run ${BOLD}pixeltui${RESET} — the first launch walks you through setup,\n"
+printf "  verifies everything, then opens the player. That's it.\n\n"
 printf "  ${DIM}(open a new terminal first if 'pixeltui' isn't found)${RESET}\n\n"

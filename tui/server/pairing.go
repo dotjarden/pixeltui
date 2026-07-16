@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -182,10 +183,44 @@ func constantEqual(a, b string) bool {
 
 func osHostname() (string, error) { return os.Hostname() }
 
+// pairingDetails is the single source of truth for terminal and desktop
+// pairing surfaces. The payload is intentionally the same deep link the iOS
+// app accepts when it scans a server QR.
+func (s *server) pairingDetails() (base, code, link string) {
+	base = s.baseURL()
+	s.pairMu.Lock()
+	code = s.code
+	s.pairMu.Unlock()
+	link = fmt.Sprintf("pixeltui://pair?url=%s&code=%s", url.QueryEscape(base), code)
+	return base, code, link
+}
+
+// handlePairingInfo lets an already-paired host render the current pairing
+// code and address in its own UI. It is authenticated because the code grants
+// a new device access to the server.
+func (s *server) handlePairingInfo(w http.ResponseWriter, _ *http.Request) {
+	base, code, link := s.pairingDetails()
+	writeJSON(w, map[string]string{"url": base, "code": code, "link": link})
+}
+
+// handlePairingQR renders the current pairing deep link as a PNG. Keeping QR
+// generation in the host means desktop stays fully offline-capable and the QR
+// always rotates with the server's single-use code.
+func (s *server) handlePairingQR(w http.ResponseWriter, _ *http.Request) {
+	_, _, link := s.pairingDetails()
+	png, err := qrcode.Encode(link, qrcode.Medium, 480)
+	if err != nil {
+		http.Error(w, "could not encode pairing QR", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store, private")
+	_, _ = w.Write(png)
+}
+
 // printPairing shows the pairing QR + code at startup.
 func (s *server) printPairing() {
-	base := s.baseURL()
-	payload := fmt.Sprintf("pixeltui://pair?url=%s&code=%s", url.QueryEscape(base), s.code)
+	base, code, payload := s.pairingDetails()
 
 	fmt.Printf("\n  \033[1mpixeltui server\033[0m — %s\n", s.cfg.Name)
 	if s.currentURL() != "" {
@@ -199,7 +234,7 @@ func (s *server) printPairing() {
 		fmt.Println(q.ToSmallString(false))
 	}
 	fmt.Printf("  URL:  %s\n", base)
-	fmt.Printf("  Code: %s\n\n", s.code)
+	fmt.Printf("  Code: %s\n\n", code)
 	if s.currentURL() == "" {
 		fmt.Println("  This address only works on your network. From anywhere:")
 		fmt.Println("    pixeltui serve --tunnel tailscale     private mesh (recommended)")

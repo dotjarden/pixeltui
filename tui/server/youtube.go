@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -172,6 +173,43 @@ func (s *server) transcodeYouTube(w http.ResponseWriter, r *http.Request, videoI
 	// Stream until done or the client goes away (ctx cancel kills both procs).
 	_ = tr.Wait()
 	_ = dl.Wait()
+}
+
+type ytTrackMetadata struct {
+	VideoID     string `json:"id"`
+	Title       string `json:"title"`
+	Channel     string `json:"channel"`
+	UploadDate  string `json:"upload_date"`
+	ViewCount   int64  `json:"view_count"`
+	Description string `json:"description"`
+	License     string `json:"license"`
+	Duration    int    `json:"duration"`
+}
+
+// trackMetadata returns lightweight YouTube metadata for a video id, using
+// yt-dlp's dump-json output. This is best-effort: if yt-dlp is missing or the
+// id is unresolvable, it returns an empty struct and no error.
+func trackMetadata(videoID string) (*ytTrackMetadata, error) {
+	ydl := ytdlpPath()
+	if ydl == "" {
+		return &ytTrackMetadata{VideoID: videoID}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, ydl,
+		"--dump-single-json", "--no-playlist", "--quiet",
+		"--socket-timeout", "8",
+		"--extractor-args", "youtube:player_client=android_vr,web",
+		"https://music.youtube.com/watch?v="+videoID).Output()
+	if err != nil {
+		return &ytTrackMetadata{VideoID: videoID}, nil
+	}
+	var m ytTrackMetadata
+	if err := json.Unmarshal(out, &m); err != nil {
+		return &ytTrackMetadata{VideoID: videoID}, nil
+	}
+	m.VideoID = videoID
+	return &m, nil
 }
 
 // ytdlpPath mirrors the app's resolver: $PIXELTUI_YTDLP → venv → PATH.
