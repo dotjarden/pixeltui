@@ -28,7 +28,7 @@ import (
 // shared stream-URL disk cache first. The cache key is suffixed so it never
 // collides with the TUI's bestaudio (opus) entries for the same video.
 func (s *server) resolveM4A(videoID string) (string, error) {
-	key := videoID + "|m4a"
+	key := innertube.CacheKey(videoID)
 	if s.cfg.StreamCache != nil {
 		if u, ok := s.cfg.StreamCache.GetStreamURL(key); ok {
 			return u, nil
@@ -56,7 +56,7 @@ func (s *server) resolveM4AUncached(videoID, key string) (string, error) {
 		}
 	}
 
-	// Fast path: native InnerTube ANDROID_VR resolution (~0.2s, no yt-dlp).
+	// Fast path: native InnerTube VISIONOS resolution (~0.2s, no yt-dlp).
 	if res, err := innertube.Resolve(context.Background(), videoID); err == nil && res.URL != "" {
 		if s.cfg.StreamCache != nil {
 			s.cfg.StreamCache.PutStreamURL(key, res.URL, res.Expire)
@@ -70,9 +70,9 @@ func (s *server) resolveM4AUncached(videoID, key string) (string, error) {
 	if ydl == "" {
 		return "", fmt.Errorf("yt-dlp not found")
 	}
-	u, err := ytGetURL(ydl, videoID, "android_vr")
+	u, err := ytGetURL(ydl, videoID, "visionos")
 	if err != nil {
-		u, err = ytGetURL(ydl, videoID, "android_vr,web")
+		u, err = ytGetURL(ydl, videoID, "visionos,web")
 	}
 	if err != nil {
 		return "", err
@@ -146,7 +146,7 @@ func (s *server) transcodeYouTube(w http.ResponseWriter, r *http.Request, videoI
 
 	dl := exec.CommandContext(ctx, ydl,
 		"-f", "bestaudio/best", "-o", "-", "--quiet", "--no-playlist",
-		"--extractor-args", "youtube:player_client=android_vr,web", watch)
+		"--extractor-args", "youtube:player_client=visionos,web", watch)
 	tr := exec.CommandContext(ctx, ff,
 		"-hide_banner", "-loglevel", "error",
 		"-i", "pipe:0", "-vn", "-c:a", "aac", "-b:a", "192k", "-f", "adts", "pipe:1")
@@ -199,7 +199,7 @@ func trackMetadata(videoID string) (*ytTrackMetadata, error) {
 	out, err := exec.CommandContext(ctx, ydl,
 		"--dump-single-json", "--no-playlist", "--quiet",
 		"--socket-timeout", "8",
-		"--extractor-args", "youtube:player_client=android_vr,web",
+		"--extractor-args", "youtube:player_client=visionos,web",
 		"https://music.youtube.com/watch?v="+videoID).Output()
 	if err != nil {
 		return &ytTrackMetadata{VideoID: videoID}, nil

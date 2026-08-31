@@ -1,5 +1,5 @@
 // Package innertube resolves YouTube video ids to pre-signed CDN audio URLs
-// natively, via the InnerTube /player endpoint using the ANDROID_VR client.
+// natively, via the InnerTube /player endpoint using the VISIONOS client.
 // That client returns *pre-signed* URLs — no signature cipher, no `nsig`
 // descrambling — so resolution is a single stdlib HTTP call (~0.2s) instead
 // of spawning yt-dlp/Python (~2–20s). Used by both the TUI player and the
@@ -26,14 +26,20 @@ import (
 const (
 	playerURL  = "https://youtubei.googleapis.com/youtubei/v1/player"
 	visitorURL = "https://youtubei.googleapis.com/youtubei/v1/visitor_id"
-	// Track yt-dlp's current ANDROID_VR clientVersion. HARD CAP: never bump above
-	// 1.65.x — versions >1.65 return SABR-only streams with no `url` field
-	// (unusable for a stdlib resolver; yt-dlp #16168). A *stale* version gets a
-	// bot/consent HTML page back instead of JSON (slow hang → decode error), so
-	// keeping this current with yt-dlp is what keeps native resolution working.
-	androidVRVersion = "1.65.10"
-	androidVRUA      = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+	// YouTube began 403ing every media format issued to ANDROID_VR 1.65.10 in
+	// August 2026. VISIONOS is the current direct-URL client that does not need
+	// a GVS proof-of-origin token.
+	streamClientName    = "VISIONOS"
+	streamClientVersion = "1.02"
+	streamClientUA      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+	streamCacheVersion  = "visionos-v1"
 )
+
+// CacheKey namespaces resolved URLs by the client profile that signed them.
+// This prevents pre-upgrade ANDROID_VR URLs from surviving the resolver fix.
+func CacheKey(videoID string) string {
+	return videoID + "|m4a|" + streamCacheVersion
+}
 
 // Result is a resolved stream: a direct AAC/m4a CDN URL, the video's
 // authoritative duration, and the URL's expiry (unix seconds).
@@ -63,13 +69,12 @@ func clientContext() map[string]any {
 	vd := visitorData
 	visitorMu.Unlock()
 	c := map[string]any{
-		"clientName":        "ANDROID_VR",
-		"clientVersion":     androidVRVersion,
-		"deviceMake":        "Oculus",
-		"deviceModel":       "Quest 3",
-		"androidSdkVersion": 32,
-		"osName":            "Android",
-		"osVersion":         "12L",
+		"clientName":    streamClientName,
+		"clientVersion": streamClientVersion,
+		"deviceMake":    "Apple",
+		"deviceModel":   "RealityDevice17,1",
+		"osName":        "visionOS",
+		"osVersion":     "26.5.23O471",
 	}
 	if vd != "" {
 		c["visitorData"] = vd
@@ -88,7 +93,7 @@ func ensureVisitor(ctx context.Context, force bool) {
 	}
 	reqBody, _ := json.Marshal(map[string]any{
 		"context": map[string]any{"client": map[string]any{
-			"clientName": "ANDROID_VR", "clientVersion": androidVRVersion,
+			"clientName": streamClientName, "clientVersion": streamClientVersion,
 		}},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, visitorURL, bytes.NewReader(reqBody))
@@ -96,7 +101,7 @@ func ensureVisitor(ctx context.Context, force bool) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", androidVRUA)
+	req.Header.Set("User-Agent", streamClientUA)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return
@@ -150,7 +155,7 @@ func player(ctx context.Context, videoID string) (Result, error) {
 		return Result{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", androidVRUA)
+	req.Header.Set("User-Agent", streamClientUA)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

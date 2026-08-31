@@ -299,8 +299,8 @@ func mpvBaseArgs(socket, title, coverPath string) []string {
 		"--ytdl-format=bestaudio/best",
 		// Pin the fast extractor client for mpv's internal yt-dlp (fallback path
 		// only). MUST use -append: plain --ytdl-raw-options comma-splits the
-		// value, so "android_vr,web" would break mpv startup entirely.
-		"--ytdl-raw-options-append=extractor-args=youtube:player_client=android_vr,web",
+		// value, so "visionos,web" would break mpv startup entirely.
+		"--ytdl-raw-options-append=extractor-args=youtube:player_client=visionos,web",
 		"--no-terminal",
 		"--really-quiet",
 		"--input-ipc-server=" + socket,
@@ -381,11 +381,11 @@ func padSkipPlaylist(socket string) {
 // ytExtractorArgs pins YouTube player clients for extraction speed.
 //
 // The default behaviour probes several clients serially (~24s here). The
-// "android_vr" client returns a clean, audio-only, pre-signed URL with no
+// "visionos" client returns a clean, audio-only, pre-signed URL with no
 // "n" signature to compute and no PO-token requirement — typically ~2× faster
 // and ffplay/mpv-compatible (opus/webm). "web" is kept as a resilient fallback
-// in case android_vr is ever blocked.
-var ytExtractorArgs = []string{"--extractor-args", "youtube:player_client=android_vr,web"}
+// in case visionos is ever blocked.
+var ytExtractorArgs = []string{"--extractor-args", "youtube:player_client=visionos,web"}
 
 // withYT prepends the shared fast-extraction flags to a yt-dlp arg list.
 func withYT(args ...string) []string {
@@ -565,7 +565,7 @@ func EnsureVideoID(c engine.Candidate) engine.Candidate {
 }
 
 // Start begins streaming a candidate. We ALWAYS resolve the direct CDN URL
-// ourselves (fast android_vr client) and hand it to the player — mpv's internal
+// ourselves (fast visionos client) and hand it to the player — mpv's internal
 // ytdl hook is slow/fragile (it hangs on music.youtube URLs), so we never rely
 // on it. Resolution order:
 //  1. resolve CDN URL (preloaded if available, else InnerTube/yt-dlp)

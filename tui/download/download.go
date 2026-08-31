@@ -22,7 +22,7 @@ const outputTemplate = "%(artist,uploader,creator|Unknown Artist)s/%(album,playl
 // cover art (needs the `mutagen` module; we retry without it if unavailable).
 func args(dir, watchURL string, thumb bool) []string {
 	a := []string{
-		"--extractor-args", "youtube:player_client=android_vr,web",
+		"--extractor-args", "youtube:player_client=visionos,web",
 		"-x",                          // extract audio (keeps source codec — no quality loss)
 		"--audio-quality", "0",        // best
 		"--concurrent-fragments", "5", // parallel fragment download — the main speed win

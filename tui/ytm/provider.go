@@ -164,7 +164,7 @@ func (p *Provider) StreamURL(ctx context.Context, id string) (string, error) {
 // ResolveStream implements source.Provider. It returns a pre-signed m4a CDN
 // URL for the video id, consulting the optional cache.
 func (p *Provider) ResolveStream(ctx context.Context, id string) (string, error) {
-	return p.resolveM4A(id)
+	return p.resolveM4A(ctx, id)
 }
 
 // ArtURL implements source.Provider. YouTube thumbnails are public URLs.
@@ -228,16 +228,16 @@ func (p *Provider) Download(ctx context.Context, id, destDir string) (string, er
 // resolveM4A returns a direct AAC/m4a CDN URL for a video id, consulting the
 // optional cache. It mirrors the server-side logic but lives in the provider so
 // future callers (server, TUI, pocket) can resolve through the same path.
-func (p *Provider) resolveM4A(videoID string) (string, error) {
-	key := videoID + "|m4a"
+func (p *Provider) resolveM4A(ctx context.Context, videoID string) (string, error) {
+	key := innertube.CacheKey(videoID)
 	if p.streamCache != nil {
 		if u, ok := p.streamCache.GetStreamURL(key); ok {
 			return u, nil
 		}
 	}
 
-	// Fast path: native InnerTube ANDROID_VR resolution.
-	if res, err := innertube.Resolve(context.Background(), videoID); err == nil && res.URL != "" {
+	// Fast path: native InnerTube VISIONOS resolution.
+	if res, err := innertube.Resolve(ctx, videoID); err == nil && res.URL != "" {
 		if p.streamCache != nil {
 			p.streamCache.PutStreamURL(key, res.URL, res.Expire)
 		}
@@ -260,9 +260,9 @@ func resolveM4AWithYTDLP(videoID string) (string, error) {
 	if ydl == "" {
 		return "", fmt.Errorf("yt-dlp not found")
 	}
-	u, err := ytGetURL(ydl, videoID, "android_vr")
+	u, err := ytGetURL(ydl, videoID, "visionos")
 	if err != nil {
-		u, err = ytGetURL(ydl, videoID, "android_vr,web")
+		u, err = ytGetURL(ydl, videoID, "visionos,web")
 	}
 	return u, err
 }

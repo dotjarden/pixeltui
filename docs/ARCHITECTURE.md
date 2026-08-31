@@ -48,7 +48,7 @@ All Go code lives under `tui/` (module `github.com/dotjarden/pixeltui`).
 | `tui/server` | The companion-app HTTP server: ~40 REST endpoints + SSE, pairing/auth, streaming proxy/relay, discovery (mixes/stations/radio/recommendations). See [API.md](API.md). |
 | `tui/engine` | Recommendation scorer. Signals: similarity 0.40, artist-novelty 0.35, popularity 0.20, serendipity 0.05; liked-artist affinity boost; max 2 tracks per artist. |
 | `tui/store` | Data layer behind the engine: the **hybrid** four-layer source (static graph → fresh cache → live Last.fm → stale cache), the bbolt cache (`cache.db`), the gob+gzip graph (`graph.bin`), and the parallel BFS graph builder. |
-| `tui/innertube` | Native YouTube stream resolution via the InnerTube `/player` endpoint (ANDROID_VR client → pre-signed CDN URLs, no signature cipher). One stdlib HTTP call, ~0.2s. Used by both the TUI player and the server; yt-dlp is only a fallback at call sites. |
+| `tui/innertube` | Native YouTube stream resolution via the InnerTube `/player` endpoint (VISIONOS client → pre-signed CDN URLs, no signature cipher). One stdlib HTTP call, ~0.2s. Used by both the TUI player and the server; yt-dlp is only a fallback at call sites. |
 | `tui/library` | The portable on-disk library: M3U8 playlists (incl. the reserved "Liked Songs"), append-only `history.jsonl`, `session.json`. Mutex-guarded writes; last-write-wins at file granularity. |
 | `tui/lastfm` | Read-only Last.fm API client (similar tracks/artists, top tracks, tags, artist info). Connection-pooled, gzip. |
 | `tui/ytm` | YouTube Music metadata: search, resolve (artist/track → video id), radio, charts, artist/album pages, plain lyrics. Unauthenticated. |
